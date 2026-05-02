@@ -1,27 +1,33 @@
-"""
-PokéLab — an MCP server that fetches, saves, designs, and renders Pokemon cards.
+"""PokéLab is an MCP server for live Pokemon TCG lookups, collection storage,
+and Prefab-powered visual card apps.
 
-Stitches together every Session 4 pattern:
+Session 4 patterns used:
     Lesson 01  @mcp.tool(), file CRUD, sandbox folder, HTTP fetch
-  Lesson 02  mcp.run() entry point, stdio transport
-  Lesson 04A Prefab DSL, nested with-blocks
-  Lesson 04B Rx + SetState reactive state
-  Lesson 04C @mcp.tool(app=True) returning a PrefabApp
+    Lesson 02  mcp.run() entry point, stdio transport
+    Lesson 04A Prefab DSL, nested with-blocks
+    Lesson 04B Rx + SetState reactive state
+    Lesson 04C @mcp.tool(app=True) returning a PrefabApp
     Lesson 04D Talk-to-App pattern — structured inputs, Python renders them
 
-Tools exposed:
-  fetch_real_card(name)       — internet:    Pokemon TCG API (includes card image)
-    preview_real_card(name)     — Prefab UI:   visual real-card search with inline save
-  manage_collection(action,…) — file CRUD:   sandbox/collection.json
-  refresh_collection_images() — internet:    backfills image URLs for old saved cards
-  card_lab()                  — Prefab UI:   renders collection as a styled grid
-    design_card()               — Prefab UI:   form-driven custom card designer
-    save_custom_card(...)       — file CRUD:   saves a designed card from the UI
+Exposed MCP tools:
+    fetch_real_card(name)         — raw live Pokemon TCG lookup
+    manage_collection(action, ...) — save, list, remove, or clear cards
+    refresh_collection_images()   — backfill embedded images for saved cards
+    card_lab()                    — visual saved-collection dashboard
+    preview_real_card(name)       — visual live search with inline save
+    save_custom_card(...)         — persist a designed custom card
+    design_card()                 — interactive Prefab card designer
 
-Run:
-    python server.py                    # stdio mode for Claude Desktop
-    fastmcp dev inspector server.py     # MCP Inspector for tool testing
-    fastmcp dev apps server.py          # browser preview for app-returning tools
+Async client skeleton for the sample queries in the tool docstrings:
+    from fastmcp import Client
+
+    async with Client("server.py") as client:
+        result = await client.call_tool("<tool_name>", {...})
+
+Run locally:
+    python server.py
+    fastmcp dev inspector server.py
+    fastmcp dev apps server.py
 """
 
 from __future__ import annotations
@@ -38,9 +44,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
-# Default User-Agent — pokemontcg.io / its CDN reject the default
-# `Python-urllib/3.x` UA with HTTP 403, so every outbound request goes through
-# this header set.
+# pokemontcg.io rejects the default Python urllib user agent with HTTP 403,
+# so every outbound request shares this header set.
 DEFAULT_HEADERS = {
     "User-Agent": "PokeLab/1.0 (+https://github.com/PokeLab) Python-urllib",
     "Accept": "application/json, image/*;q=0.9, */*;q=0.5",
@@ -93,8 +98,8 @@ from prefab_ui.components.control_flow import If
 
 load_dotenv()
 # ---------------------------------------------------------------------------
-# Sandbox — every file we touch lives in here, mirroring the safety pattern
-# from example_mcp_server.py.
+# Sandbox storage. All local writes stay under sandbox/ so the demo never
+# touches arbitrary files.
 # ---------------------------------------------------------------------------
 
 SANDBOX = Path(__file__).parent / "sandbox"
@@ -102,13 +107,13 @@ SANDBOX.mkdir(exist_ok=True)
 COLLECTION_FILE = SANDBOX / "collection.json"
 
 # ---------------------------------------------------------------------------
-# MCP server instance.
+# MCP server root.
 # ---------------------------------------------------------------------------
 
 mcp = FastMCP("PokeLab")
 
 # ---------------------------------------------------------------------------
-# Type → visual style mapping
+# Type-to-style mappings shared across collection, search, and custom art.
 # ---------------------------------------------------------------------------
 
 TYPE_STYLES = {
@@ -257,11 +262,10 @@ def _card_image_url(card: dict) -> str:
 
 
 # ===========================================================================
-# 1. INTERNET TOOL — Pokemon TCG API
+# 1. LIVE LOOKUP HELPERS — Pokemon TCG API
 # ===========================================================================
-# Returns normalized card dicts — only the fields we render.
-# Trimming the response keeps tokens down when the model passes the result
-# back to itself or when a visual search renders multiple matches.
+# Normalize remote API payloads into the smaller card shape used by both the
+# raw fetch tool and the visual search app.
 # ---------------------------------------------------------------------------
 
 POKE_TCG_BASE = "https://api.pokemontcg.io/v2/cards"
@@ -446,7 +450,10 @@ def _lookup_real_cards(name: str, *, page_size: int = 1) -> list[dict] | dict:
 def fetch_real_card(
     name: Annotated[str, "Pokemon name to look up against the live Pokemon TCG API, such as 'charizard' or 'pikachu'."]
 ) -> dict:
-    """Fetch a real Pokemon card by name from the Pokemon TCG API.
+    """Fetch one live Pokemon card as structured data.
+
+    Sample query:
+        await client.call_tool("fetch_real_card", {"name": "pikachu"})
 
     Args:
         name: A Pokemon name like "pikachu", "charizard", "mewtwo".
@@ -462,10 +469,10 @@ def fetch_real_card(
 
 
 # ===========================================================================
-# 2. FILE CRUD TOOL — collection.json
+# 2. COLLECTION HELPERS — sandbox/collection.json
 # ===========================================================================
-# A single tool dispatched by an `action` argument. JSON file storage instead
-# of SQLite — easier to eyeball during the demo (and easier to git diff).
+# The collection is stored as JSON so it stays easy to inspect during demos and
+# easy to diff while iterating on the server.
 # ---------------------------------------------------------------------------
 
 def _load_collection():
@@ -505,10 +512,17 @@ def _saved_state_key(card_id: str) -> str:
 
 @mcp.tool()
 def manage_collection(action: str, card: dict | None = None, card_id: str | None = None) -> str:
-    """CRUD over the saved card collection.
-    action: add | list | remove | clear
-    card: dict from fetch_real_card (for add)
-    card_id: string id (for remove)
+    """Manage cards stored in sandbox/collection.json.
+
+    Sample queries:
+        await client.call_tool("manage_collection", {"action": "list"})
+        await client.call_tool("manage_collection", {"action": "remove", "card_id": "base1-4"})
+        await client.call_tool("manage_collection", {"action": "add", "card": card_payload})
+
+    Args:
+        action: One of add, list, remove, or clear.
+        card: Card payload to save when action is add.
+        card_id: Card id to remove when action is remove.
     """
     cards = _load_collection()
     if action == "add":
@@ -535,13 +549,17 @@ def manage_collection(action: str, card: dict | None = None, card_id: str | None
 
 
 # ===========================================================================
-# 2b. REFRESH IMAGES — backfill image_url for old saved cards
+# 2b. IMAGE BACKFILL TOOL — re-embed saved card art
 # ===========================================================================
 
 @mcp.tool()
 def refresh_collection_images() -> str:
-    """Re-fetch image URLs from the Pokemon TCG API for any saved card missing one.
-    Run this once if your collection was saved with the old server.py.
+    """Backfill embedded image data for saved cards.
+
+    Sample query:
+        await client.call_tool("refresh_collection_images", {})
+
+    Run this once if your collection was saved with an older server version.
     """
     cards = _load_collection()
     updated = 0
@@ -583,8 +601,8 @@ def refresh_collection_images() -> str:
                 else:
                     failed += 1
             elif existing:
-                # Already had a remote URL — re-embed as data URI so the host
-                # iframe can render it without external network access.
+                # If a saved card only has a remote URL, re-embed it as a data
+                # URI so stricter MCP host iframes can still render the art.
                 card["image_remote_url"] = existing if not existing.startswith("data:") else card.get("image_remote_url", "")
                 card["image_url"] = _fetch_image_data_uri(card.get("image_remote_url") or existing)
                 updated += 1
@@ -607,7 +625,7 @@ def refresh_collection_images() -> str:
 
 
 # ===========================================================================
-# 3. PREFAB UI — redesigned card renderer + card_lab grid
+# 3. PREFAB UI HELPERS — shared renderers for collection, search, and studio
 # ===========================================================================
 
 def _save_fetched_card_action(card: dict, saved_state_key: str | None = None) -> CallTool:
@@ -809,7 +827,7 @@ def _render_search_result_card(
     save_action: CallTool | None = None,
     saved_state_key: str | None = None,
 ) -> None:
-    """Render a compact card tile for the live TCG search grid."""
+    """Render a compact card tile for the live-search grid."""
     types = card.get("types") or ["Colorless"]
     style = _type_style(types)
     symbol = style["symbol"]
@@ -894,7 +912,7 @@ def _render_card(
     save_action: CallTool | None = None,
     saved_state_key: str | None = None,
 ) -> None:
-    """Render one Pokemon card with type colours, image, attacks, and footer."""
+    """Render one full-size collection card with shared card chrome."""
     types    = card.get("types") or ["Colorless"]
     style    = _type_style(types)
     bg       = style["bg"]
@@ -962,7 +980,11 @@ def _render_card(
     },
 )
 def card_lab() -> PrefabApp:
-    """Render my Pokémon card collection as a visual grid with card images."""
+    """Open the saved-card collection dashboard.
+
+    Sample query:
+        await client.call_tool("card_lab", {})
+    """
     cards = _load_collection()
     count_label = f"{len(cards)} card{'s' if len(cards) != 1 else ''}"
 
@@ -1000,7 +1022,11 @@ def card_lab() -> PrefabApp:
 def preview_real_card(
     name: Annotated[str, "Pokemon name to search for in the live Pokemon TCG API, such as 'charizard' or 'pikachu'."]
 ) -> PrefabApp:
-    """Show a visual real-card search with inline save controls."""
+    """Open the live Pokemon TCG search UI with inline save controls.
+
+    Sample query:
+        await client.call_tool("preview_real_card", {"name": "charizard"})
+    """
     cards_or_error = _lookup_real_cards(name, page_size=6)
     cards: list[dict] = []
     error_message = ""
@@ -1056,7 +1082,7 @@ def preview_real_card(
 
 
 # ===========================================================================
-# 4. DESIGN CARD — Prefab form + deterministic renderer
+# 4. CARD STUDIO HELPERS — deterministic custom-card generation and UI
 # ===========================================================================
 
 def _coerce_int(value, default: int, minimum: int, maximum: int) -> int:
@@ -1199,7 +1225,11 @@ def save_custom_card(
     first_edition: bool | str = False,
     notes: str = "",
 ) -> dict:
-    """Save a custom card submitted from the Prefab card designer UI."""
+    """Save a custom card submitted from the Prefab designer UI.
+
+    Sample query:
+        await client.call_tool("save_custom_card", {"name": "Embersprite", "primary_type": "Fire"})
+    """
     cards = _load_collection()
     card = _build_custom_card(
         card_id=_next_custom_id(cards),
@@ -1336,7 +1366,11 @@ def _render_live_card_preview() -> None:
 
 @mcp.tool(app=True)
 def design_card() -> PrefabApp:
-    """Open an interactive Prefab card designer instead of asking for a long prompt."""
+    """Open the interactive Prefab card designer.
+
+    Sample query:
+        await client.call_tool("design_card", {})
+    """
     initial_state = {
         "name": "Embersprite",
         "hp": 80,
@@ -1421,9 +1455,9 @@ def design_card() -> PrefabApp:
                                         with Row(justify="between", align="center"):
                                             Text("HP", css_class="text-sm font-medium")
                                             Badge("{{ hp }}", variant="warning")
-                                        # `name="hp"` binds reactively to state.hp (seeded as 80);
-                                        # passing a templated `value="{{ hp }}"` here makes the
-                                        # JS Slider validator reject the prop as non-numeric.
+                                        # Slider state already binds through `name`. Passing
+                                        # `value="{{ hp }}"` here would send a templated string
+                                        # and fail the Prefab slider prop validator.
                                         Slider(name="hp", min=30, max=220, step=10)
                                     Separator()
                                     with Grid(columns=2, gap=4):
@@ -1466,9 +1500,9 @@ def design_card() -> PrefabApp:
                                             Text("Resistance value", css_class="text-sm font-medium")
                                             Input(name="resistance_value", placeholder="-30")
                                     with Row(gap=4, align="center"):
-                                        # Switch / Checkbox bind reactively via `name`. Passing a
-                                        # templated string for `value` (e.g. "{{ holo }}") fails
-                                        # the JS prop validator because these expect bool only.
+                                        # Boolean controls also bind through `name`. Passing a
+                                        # templated `value` like `"{{ holo }}"` would turn the
+                                        # prop into a string and break validation.
                                         Switch(name="holo", label="Holographic finish")
                                         Checkbox(name="first_edition", label="First edition stamp")
                                     Textarea(name="flavor", rows=3, placeholder="Flavor text")
@@ -1515,7 +1549,7 @@ def design_card() -> PrefabApp:
 
 
 # ===========================================================================
-# 5. PROMPT — slash command
+# 5. MCP PROMPT — guided demo shortcut
 # ===========================================================================
 
 @mcp.prompt()
