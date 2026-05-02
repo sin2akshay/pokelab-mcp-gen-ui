@@ -25,6 +25,7 @@ Run:
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import sys
@@ -33,6 +34,14 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
+# Default User-Agent — pokemontcg.io / its CDN reject the default
+# `Python-urllib/3.x` UA with HTTP 403, so every outbound request goes through
+# this header set.
+DEFAULT_HEADERS = {
+    "User-Agent": "PokeLab/1.0 (+https://github.com/PokeLab) Python-urllib",
+    "Accept": "application/json, image/*;q=0.9, */*;q=0.5",
+}
 
 from dotenv import load_dotenv
 from fastmcp import FastMCP
@@ -158,10 +167,35 @@ def _json_get(
     if params:
         url = f"{url}?{urlencode(params)}"
 
-    request = Request(url, headers=headers or {})
+    merged_headers = {**DEFAULT_HEADERS, **(headers or {})}
+    request = Request(url, headers=merged_headers)
     with urlopen(request, timeout=timeout) as response:
         payload = response.read().decode("utf-8")
         return response.status, json.loads(payload)
+
+
+def _fetch_image_data_uri(url: str, *, timeout: float = 10) -> str:
+    """Download an image and return it as a base64 ``data:`` URI.
+
+    Embedding bytes inline avoids CSP / mixed-origin restrictions in MCP host
+    iframes that block ``https://images.pokemontcg.io`` directly. On any
+    failure we fall back to the original URL so the collection at least keeps
+    a clickable link instead of crashing the renderer.
+    """
+    if not url:
+        return ""
+    try:
+        request = Request(url, headers=DEFAULT_HEADERS)
+        with urlopen(request, timeout=timeout) as response:
+            data = response.read()
+            content_type = response.headers.get("Content-Type", "image/png")
+        if not data:
+            return url
+        return f"data:{content_type};base64,{base64.b64encode(data).decode('ascii')}"
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError):
+        return url
+    except Exception:
+        return url
 
 
 @mcp.tool()
@@ -185,34 +219,45 @@ def fetch_real_card(name: str) -> dict:
             headers=headers,
             timeout=10,
         )
-    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as e:
+    except HTTPError as e:
+        return {"error": f"Pokemon TCG API returned HTTP {e.code} for {name!r}: {e.reason}"}
+    except (URLError, TimeoutError) as e:
         return {"error": f"Network error fetching {name!r}: {e}"}
+    except json.JSONDecodeError as e:
+        return {"error": f"Invalid JSON from Pokemon TCG API for {name!r}: {e}"}
+    except Exception as e:  # pragma: no cover - defensive
+        return {"error": f"Unexpected error fetching {name!r}: {e}"}
 
-    cards = payload.get("data", [])
+    if not isinstance(payload, dict):
+        return {"error": f"Unexpected response shape for {name!r}"}
+
+    cards = payload.get("data", []) or []
     if not cards:
         return {"error": f"No card found for {name!r}"}
 
     c = cards[0]
+    remote_image = c.get("images", {}).get("small", "")
     return {
-        "id": c["id"],
-        "name": c["name"],
+        "id": c.get("id", ""),
+        "name": c.get("name", name.title()),
         "hp": c.get("hp", "?"),
-        "types": c.get("types", []),
+        "types": c.get("types", []) or [],
         "subtitle": (c.get("subtypes") or ["Basic"])[0],
         "attacks": [
-            {"name": a["name"], "cost": a.get("cost", []),
+            {"name": a.get("name", ""), "cost": a.get("cost", []) or [],
              "damage": a.get("damage", ""), "text": a.get("text", "")}
-            for a in c.get("attacks", [])
+            for a in (c.get("attacks") or [])
         ],
         "weakness": (
             {"type": c["weaknesses"][0].get("type", ""),
              "value": c["weaknesses"][0].get("value", "")}
             if c.get("weaknesses") else None
         ),
-        "set": c.get("set", {}).get("name", ""),
+        "set": (c.get("set") or {}).get("name", ""),
         "number": c.get("number", ""),
         "rarity": c.get("rarity", ""),
-        "image_url": c.get("images", {}).get("small", ""),
+        "image_url": _fetch_image_data_uri(remote_image),
+        "image_remote_url": remote_image,
         "source": "pokemon_tcg_api",
     }
 
@@ -229,12 +274,18 @@ def _load_collection():
         return []
     try:
         return json.loads(COLLECTION_FILE.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"PokeLab: failed to load collection ({e}); starting empty.", file=sys.stderr)
         return []
 
 
-def _save_collection(cards):
-    COLLECTION_FILE.write_text(json.dumps(cards, indent=2), encoding="utf-8")
+def _save_collection(cards) -> bool:
+    try:
+        COLLECTION_FILE.write_text(json.dumps(cards, indent=2), encoding="utf-8")
+        return True
+    except (OSError, TypeError) as e:
+        print(f"PokeLab: failed to save collection ({e}).", file=sys.stderr)
+        return False
 
 
 @mcp.tool()
@@ -280,32 +331,58 @@ def refresh_collection_images() -> str:
     cards = _load_collection()
     updated = 0
     skipped = 0
+    failed = 0
     headers = {}
     if api_key := os.getenv("POKEMON_TCG_API_KEY"):
         headers["X-Api-Key"] = api_key
 
     for card in cards:
-        if card.get("image_url") or card.get("source") in CUSTOM_CARD_SOURCES:
+        existing = card.get("image_url", "")
+        is_custom = card.get("source") in CUSTOM_CARD_SOURCES
+        is_data_uri = isinstance(existing, str) and existing.startswith("data:")
+        if is_custom or is_data_uri:
             skipped += 1
             continue
         card_id = card.get("id", "")
+        if not card_id:
+            failed += 1
+            continue
         try:
             status, payload = _json_get(
                 f"{POKE_TCG_BASE}/{card_id}",
                 headers=headers,
                 timeout=10,
             )
-            if status == 200:
-                img = payload.get("data", {}).get("images", {}).get("small", "")
+            if status == 200 and isinstance(payload, dict):
+                img = (payload.get("data") or {}).get("images", {}).get("small", "")
                 if img:
-                    card["image_url"] = img
+                    card["image_remote_url"] = img
+                    card["image_url"] = _fetch_image_data_uri(img)
                     updated += 1
+                else:
+                    failed += 1
+            elif existing:
+                # Already had a remote URL — re-embed as data URI so the host
+                # iframe can render it without external network access.
+                card["image_remote_url"] = existing if not existing.startswith("data:") else card.get("image_remote_url", "")
+                card["image_url"] = _fetch_image_data_uri(card.get("image_remote_url") or existing)
+                updated += 1
+            else:
+                failed += 1
             time.sleep(0.1)
-        except Exception:
-            pass
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OSError) as e:
+            print(f"PokeLab: refresh failed for {card_id}: {e}", file=sys.stderr)
+            failed += 1
+        except Exception as e:  # pragma: no cover - defensive
+            print(f"PokeLab: unexpected error refreshing {card_id}: {e}", file=sys.stderr)
+            failed += 1
 
-    _save_collection(cards)
-    return f"Done. Updated {updated} cards with images. Skipped {skipped}."
+    saved = _save_collection(cards)
+    suffix = "" if saved else " (WARNING: could not persist collection.json)"
+    return (
+        f"Done. Updated {updated} cards with embedded images, skipped {skipped}, "
+        f"failed {failed}.{suffix}"
+    )
 
 
 # ===========================================================================
@@ -747,7 +824,10 @@ def design_card() -> PrefabApp:
                                         with Row(justify="between", align="center"):
                                             Text("HP", css_class="text-sm font-medium")
                                             Badge("{{ hp }}", variant="warning")
-                                        Slider(name="hp", value="{{ hp }}", min=30, max=220, step=10, gradient=True)
+                                        # `name="hp"` binds reactively to state.hp (seeded as 80);
+                                        # passing a templated `value="{{ hp }}"` here makes the
+                                        # JS Slider validator reject the prop as non-numeric.
+                                        Slider(name="hp", min=30, max=220, step=10)
                                     Separator()
                                     with Grid(columns=2, gap=4):
                                         with Column(gap=2):
@@ -781,8 +861,11 @@ def design_card() -> PrefabApp:
                                             Text("Weakness value", css_class="text-sm font-medium")
                                             Input(name="weakness_value", placeholder="x2")
                                     with Row(gap=4, align="center"):
-                                        Switch(name="holo", label="Holographic finish", value="{{ holo }}")
-                                        Checkbox(name="first_edition", label="First edition stamp", value="{{ first_edition }}")
+                                        # Switch / Checkbox bind reactively via `name`. Passing a
+                                        # templated string for `value` (e.g. "{{ holo }}") fails
+                                        # the JS prop validator because these expect bool only.
+                                        Switch(name="holo", label="Holographic finish")
+                                        Checkbox(name="first_edition", label="First edition stamp")
                                     Textarea(name="flavor", rows=3, placeholder="Flavor text")
                                     with Accordion(default_open_items=0):
                                         with AccordionItem("Designer notes", value="notes"):
