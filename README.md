@@ -8,14 +8,13 @@ It started as an EAGv3 Session 4 exercise and has since been tightened into a vi
 
 ## What it does
 
-Seven tools and one built-in prompt are exposed over MCP:
+Six tools and one built-in prompt are exposed over MCP:
 
 | Tool | Surface | Use it when |
 |---|---|---|
 | `fetch_real_card(name)` | Raw structured data | You want one live card payload for automation, chaining, or prose answers |
 | `preview_real_card(name)` | Prefab MCP app | You want a live visual search grid with inline save buttons |
 | `manage_collection(action, …)` | Backend tool | You want to add, list, remove, or clear saved cards |
-| `refresh_collection_images()` | Maintenance tool | You want to backfill embedded art for previously saved cards |
 | `card_lab()` | Prefab MCP app | You want the saved collection dashboard, not a live API search |
 | `design_card()` | Prefab MCP app | You want an interactive card designer with live preview |
 | `save_custom_card(...)` | Backend tool | The designer or an agent wants to persist a custom card |
@@ -56,7 +55,6 @@ Useful one-liners for individual tools:
 - `await client.call_tool("preview_real_card", {"name": "bulbasaur"})`
 - `await client.call_tool("manage_collection", {"action": "list"})`
 - `await client.call_tool("manage_collection", {"action": "remove", "card_id": "base1-4"})`
-- `await client.call_tool("refresh_collection_images", {})`
 - `await client.call_tool("card_lab", {})`
 - `await client.call_tool("design_card", {})`
 - `await client.call_tool("save_custom_card", {"name": "Embersprite", "primary_type": "Fire"})`
@@ -176,7 +174,7 @@ Quit completely (not just close the window) and reopen. Claude Desktop only re-r
 
 ### 4. Verify the connection
 
-Inside Claude Desktop, look for a small hammer/plug icon near the message input — that's the MCP indicator. Click it and you should see "pokelab" listed with the PokéLab tools (`fetch_real_card`, `preview_real_card`, `manage_collection`, `refresh_collection_images`, `card_lab`, `design_card`, `save_custom_card`) and the prompt (`design_card_walkthrough`).
+Inside Claude Desktop, look for a small hammer/plug icon near the message input — that's the MCP indicator. Click it and you should see "pokelab" listed with the PokéLab tools (`fetch_real_card`, `preview_real_card`, `manage_collection`, `card_lab`, `design_card`, `save_custom_card`) and the prompt (`design_card_walkthrough`).
 
 If the server fails to start, click the indicator to see the error message. The most common causes are:
 
@@ -266,7 +264,7 @@ Claude/Copilot ──MCP/stdio──►  server.py  ──HTTP──►  Pokemon
 Three layers:
 
 1. **The MCP client** picks tools based on what you ask for.
-2. **PokéLab server (`server.py`)** runs Python functions decorated with `@mcp.tool()` (or `@mcp.tool(app=True)` for the UI tools). It calls the Pokemon TCG API, persists to a JSON file, and returns either dicts/strings or Prefab UI trees. `preview_real_card`, `card_lab`, and `design_card` are the primary visual chat surfaces; `fetch_real_card`, `manage_collection`, `refresh_collection_images`, and `save_custom_card` stay available as structured backend tools.
+2. **PokéLab server (`server.py`)** runs Python functions decorated with `@mcp.tool()` (or `@mcp.tool(app=True)` for the UI tools). It calls the Pokemon TCG API, persists to a JSON file, and returns either dicts/strings or Prefab UI trees. `preview_real_card`, `card_lab`, and `design_card` are the primary visual chat surfaces; `fetch_real_card`, `manage_collection`, and `save_custom_card` stay available as structured backend tools.
 3. **The data plane** — JSON file for persistence and the Pokemon TCG API for real-card content.
 
 Recent metadata tightening also makes the live-search, saved-collection, and raw-fetch tools more explicit to MCP clients, which helps reduce wrong-surface launches in chat.

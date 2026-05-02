@@ -12,7 +12,6 @@ Session 4 patterns used:
 Exposed MCP tools:
     fetch_real_card(name)         — raw live Pokemon TCG lookup
     manage_collection(action, ...) — save, list, remove, or clear cards
-    refresh_collection_images()   — backfill embedded images for saved cards
     card_lab()                    — visual saved-collection dashboard
     preview_real_card(name)       — visual live search with inline save
     save_custom_card(...)         — persist a designed custom card
@@ -36,7 +35,6 @@ import base64
 import json
 import os
 import sys
-import time
 from html import escape
 from pathlib import Path
 from typing import Annotated
@@ -74,7 +72,6 @@ from prefab_ui.components import (
     Input,
     Metric,
     Muted,
-    Progress,
     Radio,
     RadioGroup,
     Row,
@@ -386,7 +383,6 @@ def _normalize_real_card(card: dict, default_name: str) -> dict:
         "number": card.get("number", ""),
         "rarity": card.get("rarity", ""),
         "image_url": _fetch_image_data_uri(remote_image),
-        "image_remote_url": remote_image,
         "source": "pokemon_tcg_api",
     }
 
@@ -549,82 +545,6 @@ def manage_collection(action: str, card: dict | None = None, card_id: str | None
 
 
 # ===========================================================================
-# 2b. IMAGE BACKFILL TOOL — re-embed saved card art
-# ===========================================================================
-
-@mcp.tool()
-def refresh_collection_images() -> str:
-    """Backfill embedded image data for saved cards.
-
-    Sample query:
-        await client.call_tool("refresh_collection_images", {})
-
-    Run this once if your collection was saved with an older server version.
-    """
-    cards = _load_collection()
-    updated = 0
-    skipped = 0
-    failed = 0
-    headers = {}
-    if api_key := os.getenv("POKEMON_TCG_API_KEY"):
-        headers["X-Api-Key"] = api_key
-
-    for card in cards:
-        existing = card.get("image_url", "")
-        is_custom = card.get("source") in CUSTOM_CARD_SOURCES
-        is_data_uri = isinstance(existing, str) and existing.startswith("data:")
-        if is_custom:
-            if is_data_uri:
-                skipped += 1
-            else:
-                card["image_url"] = _custom_card_image_data_uri(card)
-                updated += 1
-            continue
-        if is_data_uri:
-            skipped += 1
-            continue
-        card_id = card.get("id", "")
-        if not card_id:
-            failed += 1
-            continue
-        try:
-            status, payload = _json_get_with_retry(
-                f"{POKE_TCG_BASE}/{card_id}",
-                headers=headers,
-            )
-            if status == 200 and isinstance(payload, dict):
-                img = (payload.get("data") or {}).get("images", {}).get("small", "")
-                if img:
-                    card["image_remote_url"] = img
-                    card["image_url"] = _fetch_image_data_uri(img)
-                    updated += 1
-                else:
-                    failed += 1
-            elif existing:
-                # If a saved card only has a remote URL, re-embed it as a data
-                # URI so stricter MCP host iframes can still render the art.
-                card["image_remote_url"] = existing if not existing.startswith("data:") else card.get("image_remote_url", "")
-                card["image_url"] = _fetch_image_data_uri(card.get("image_remote_url") or existing)
-                updated += 1
-            else:
-                failed += 1
-            time.sleep(0.1)
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OSError) as e:
-            print(f"PokeLab: refresh failed for {card_id}: {e}", file=sys.stderr)
-            failed += 1
-        except Exception as e:  # pragma: no cover - defensive
-            print(f"PokeLab: unexpected error refreshing {card_id}: {e}", file=sys.stderr)
-            failed += 1
-
-    saved = _save_collection(cards)
-    suffix = "" if saved else " (WARNING: could not persist collection.json)"
-    return (
-        f"Done. Updated {updated} cards with embedded images, skipped {skipped}, "
-        f"failed {failed}.{suffix}"
-    )
-
-
-# ===========================================================================
 # 3. PREFAB UI HELPERS — shared renderers for collection, search, and studio
 # ===========================================================================
 
@@ -662,24 +582,6 @@ def _modifier_summary(label: str, modifier: dict | None) -> str:
         return f"{label}: —"
     symbol = TYPE_STYLES.get(modifier_type, TYPE_STYLES["Colorless"])["symbol"]
     return f"{label}: {symbol} {modifier_value}"
-
-
-def _render_modifier_panel(label: str, modifier: dict | None, *, compact: bool = False) -> None:
-    modifier_type = str((modifier or {}).get("type", "")).strip()
-    modifier_value = str((modifier or {}).get("value", "")).strip() or "—"
-    symbol = TYPE_STYLES.get(modifier_type, TYPE_STYLES["Colorless"])["symbol"] if modifier_type else "—"
-    value_text = f"{symbol} {modifier_value}" if modifier_type else "—"
-    shell_cls = (
-        "min-w-24 rounded-2xl border border-stone-200 bg-white/90 px-3 py-2 shadow-sm"
-        if compact else
-        "min-w-28 rounded-2xl border border-stone-200 bg-white/95 px-3 py-2 shadow-sm"
-    )
-
-    with Column(gap=0, css_class=shell_cls):
-        Text(label, css_class="text-[10px] font-semibold uppercase tracking-[0.18em] text-stone-500")
-        Text(value_text, css_class="text-sm font-semibold text-slate-900")
-        if not compact:
-            Muted(modifier_type or "Not listed", css_class="text-[11px] text-stone-500")
 
 
 def _render_card_banner(
