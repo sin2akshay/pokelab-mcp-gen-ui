@@ -726,7 +726,7 @@ def _render_card_banner(
 
             with Row(justify="between", align="start", css_class="gap-3"):
                 with Column(gap=1):
-                    CardTitle(name, css_class=f"{'text-lg' if compact else 'text-2xl'} font-bold tracking-tight leading-none {title_cls}")
+                    CardTitle(name, css_class=f"{'text-base' if compact else 'text-xl'} font-bold tracking-tight leading-none {title_cls}")
                     if subtitle:
                         CardDescription(
                             subtitle,
@@ -768,7 +768,7 @@ def _render_attack_stage(attacks: list[dict], *, compact: bool = False) -> None:
 
     with Column(gap=3, css_class="rounded-3xl border border-amber-100 bg-white/85 px-4 py-4 shadow-sm"):
         Text(
-            "Moves" if compact else "Attacks",
+            "Moves",
             css_class="text-[10px] font-semibold uppercase tracking-[0.2em] text-stone-500",
         )
 
@@ -787,7 +787,7 @@ def _render_attack_stage(attacks: list[dict], *, compact: bool = False) -> None:
                                     cost_str,
                                     css_class="rounded-full border border-stone-200 bg-white px-2.5 py-1 text-xs shadow-sm",
                                 )
-                            Text(attack.get("name", "Attack"), css_class="text-sm font-semibold text-slate-900")
+                            Text(attack.get("name", "Move"), css_class="text-sm font-semibold text-slate-900")
                         if attack.get("damage"):
                             Text(
                                 attack["damage"],
@@ -818,7 +818,7 @@ def _render_attack_stage(attacks: list[dict], *, compact: bool = False) -> None:
                         if atk.get("text"):
                             Muted(atk["text"], css_class="text-xs leading-relaxed text-slate-600")
         else:
-            Muted("No attacks listed for this card.", css_class="text-xs italic text-stone-500")
+            Muted("No moves listed for this card.", css_class="text-xs italic text-stone-500")
 
 
 def _render_search_result_card(
@@ -844,7 +844,7 @@ def _render_search_result_card(
     resistance = card.get("resistance")
     subtitle_text = f"{subtitle} · {set_name}" if subtitle and set_name else subtitle or set_name
 
-    with Card(css_class="h-full overflow-hidden rounded-3xl border border-amber-100/80 bg-gradient-to-b from-white via-amber-50/70 to-stone-100/80 shadow-lg ring-1 ring-black/5 hover:-translate-y-1 hover:shadow-2xl transition-all duration-200"):
+    with Card(css_class="flex h-full flex-col overflow-hidden rounded-3xl border border-amber-100/80 bg-gradient-to-b from-white via-amber-50/70 to-stone-100/80 shadow-lg ring-1 ring-black/5 hover:-translate-y-1 hover:shadow-2xl transition-all duration-200"):
         _render_card_banner(
             name,
             subtitle_text,
@@ -856,7 +856,7 @@ def _render_search_result_card(
             compact=True,
         )
 
-        with CardContent():
+        with CardContent(css_class="flex-1"):
             with Column(gap=3):
                 _render_art_stage(img_url, name=name, bg=bg, symbol=symbol, compact=True)
                 _render_attack_stage(attacks, compact=True)
@@ -927,7 +927,7 @@ def _render_card(
     number = card.get("number", "")
     img_url = _card_image_url(card)
 
-    with Card(css_class="overflow-hidden rounded-3xl border border-amber-100/80 bg-gradient-to-b from-white via-amber-50/70 to-stone-100/80 shadow-lg ring-1 ring-black/5 hover:-translate-y-1 hover:shadow-2xl transition-all duration-200"):
+    with Card(css_class="flex h-full flex-col overflow-hidden rounded-3xl border border-amber-100/80 bg-gradient-to-b from-white via-amber-50/70 to-stone-100/80 shadow-lg ring-1 ring-black/5 hover:-translate-y-1 hover:shadow-2xl transition-all duration-200"):
         _render_card_banner(
             name,
             subtitle,
@@ -938,7 +938,7 @@ def _render_card(
             border_cls=style["border"],
         )
 
-        with CardContent():
+        with CardContent(css_class="flex-1"):
             with Column(gap=4):
                 _render_art_stage(img_url, name=name, bg=bg, symbol=symbol)
                 _render_attack_stage(card.get("attacks", []))
@@ -1305,7 +1305,7 @@ def _save_card_action() -> CallTool:
 
 
 def _render_live_card_preview() -> None:
-    with Card(css_class="overflow-hidden rounded-3xl border border-amber-100/80 bg-gradient-to-b from-white via-amber-50/70 to-stone-100/80 shadow-lg ring-1 ring-black/5"):
+    with Card(css_class="flex flex-col overflow-hidden rounded-3xl border border-amber-100/80 bg-gradient-to-b from-white via-amber-50/70 to-stone-100/80 shadow-lg ring-1 ring-black/5"):
         with CardHeader(css_class="bg-gradient-to-r from-amber-200 via-orange-100 to-yellow-50 border-b border-amber-300 px-4 pt-5 pb-4"):
             with Column(gap=3):
                 with Row(justify="between", align="center", css_class="gap-3"):
@@ -1314,7 +1314,7 @@ def _render_live_card_preview() -> None:
                     Text("{{ rarity }}", css_class="rounded-full border border-white/80 bg-white/80 px-3 py-1.5 text-[11px] font-semibold text-slate-700 shadow-sm")
                 with Row(justify="between", align="start", css_class="gap-3"):
                     with Column(gap=1):
-                        CardTitle("{{ name }}", css_class="text-2xl font-bold tracking-tight text-slate-950")
+                        CardTitle("{{ name }}", css_class="text-xl font-bold tracking-tight text-slate-950")
                         CardDescription(
                             "{{ secondary_type ? stage + ' · ' + primary_type + ' / ' + secondary_type : stage + ' · ' + primary_type }}",
                             css_class="text-sm font-medium text-slate-700",
@@ -1322,7 +1322,7 @@ def _render_live_card_preview() -> None:
                     with Column(gap=0, align="end", css_class="rounded-2xl border border-white/80 bg-white/85 px-3 py-2 shadow-sm"):
                         Text("{{ hp }} HP", css_class="text-xl font-black text-slate-900")
                         Text("Hit points", css_class="text-[10px] font-semibold uppercase tracking-[0.18em] text-stone-600")
-        with CardContent():
+        with CardContent(css_class="flex-1"):
             with Column(gap=4):
                 with Column(gap=1, css_class="rounded-3xl border border-amber-100 bg-gradient-to-b from-stone-200/80 via-stone-100 to-white px-4 py-5 shadow-inner"):
                     Text("Card concept", css_class="text-[10px] font-semibold uppercase tracking-[0.2em] text-stone-500")
@@ -1333,7 +1333,7 @@ def _render_live_card_preview() -> None:
                         Text("{{ holo ? 'Holo' : 'Matte' }}", css_class="rounded-full border border-white bg-white/90 px-2.5 py-1 text-[11px] font-semibold text-slate-700 shadow-sm")
                     Text("{{ first_edition ? '1st Edition' : 'Standard print' }}", css_class="text-[11px] font-semibold uppercase tracking-[0.16em] text-stone-600")
                 with Column(gap=3, css_class="rounded-3xl border border-amber-100 bg-white/85 px-4 py-4 shadow-sm"):
-                    Text("Attacks", css_class="text-[10px] font-semibold uppercase tracking-[0.2em] text-stone-500")
+                    Text("Moves", css_class="text-[10px] font-semibold uppercase tracking-[0.2em] text-stone-500")
                     with Column(gap=2, css_class="rounded-2xl border border-stone-200 bg-stone-50/90 px-3 py-3 shadow-sm"):
                         with Row(justify="between", align="center", css_class="gap-2"):
                             with Row(gap=2, align="center"):
