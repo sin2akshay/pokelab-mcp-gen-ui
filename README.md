@@ -58,10 +58,24 @@ Edit `.env` and add your `GEMINI_API_KEY`. You only need this if you plan to use
 Before wiring it into Claude Desktop, verify everything works in isolation:
 
 ```bash
-fastmcp dev server.py
+cd pokelab
+fastmcp dev inspector server.py
 ```
 
-This opens a browser-based inspector. Click each tool, fill in the arguments, and watch the responses come back. For `card_lab` and `design_card`, the Prefab UI renders right there in the inspector — that's the same UI Claude Desktop will show you in chat.
+This opens the current FastMCP browser inspector. Click each tool, fill in the arguments, and watch the responses come back. For `card_lab` and `design_card`, the Prefab UI renders right there in the inspector — that's the same UI Claude Desktop will show you in chat.
+
+If you want the dedicated app preview UI instead, run:
+
+```bash
+cd pokelab
+fastmcp dev apps server.py
+```
+
+If port `8000` is already in use on your machine, pick another pair of ports, for example:
+
+```bash
+fastmcp dev apps server.py --mcp-port 8001 --dev-port 8081
+```
 
 A good test sequence in the inspector:
 

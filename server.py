@@ -11,17 +11,16 @@ Stitches together every Session 4 pattern:
   Lesson 04D Talk-to-App planner — LLM emits JSON spec, Python renders it
 
 Tools exposed:
-  fetch_real_card(name)       — internet:    Pokemon TCG API
+  fetch_real_card(name)       — internet:    Pokemon TCG API (includes card image)
   manage_collection(action,…) — file CRUD:   sandbox/collection.json
-  card_lab()                  — Prefab UI:   renders the collection in chat
+  refresh_collection_images() — internet:    backfills image URLs for old saved cards
+  card_lab()                  — Prefab UI:   renders collection as a styled grid
   design_card(prompt)         — stretch:     LLM designs a card; same renderer
 
 Run:
-  # Production / Claude Desktop — speaks MCP over stdio:
-  python server.py
-
-  # Dev preview — opens a browser to click tools and see UIs render:
-  fastmcp dev server.py
+    python server.py                    # stdio mode for Claude Desktop
+    fastmcp dev inspector server.py     # MCP Inspector for tool testing
+    fastmcp dev apps server.py          # browser preview for app-returning tools
 """
 
 from __future__ import annotations
@@ -29,34 +28,30 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
 from fastmcp import FastMCP
-from prefab_ui.actions import SetState
 from prefab_ui.app import PrefabApp
 from prefab_ui.components import (
     Badge,
-    Button,
     Card,
     CardContent,
     CardHeader,
     CardTitle,
     Column,
-    H1,
+    Grid,
     H3,
+    Image,
     Muted,
     Row,
-    Tab,
-    Tabs,
+    Separator,
     Text,
 )
-from prefab_ui.rx import Rx
 
 load_dotenv()
-
-
 # ---------------------------------------------------------------------------
 # Sandbox — every file we touch lives in here, mirroring the safety pattern
 # from example_mcp_server.py.
@@ -66,19 +61,54 @@ SANDBOX = Path(__file__).parent / "sandbox"
 SANDBOX.mkdir(exist_ok=True)
 COLLECTION_FILE = SANDBOX / "collection.json"
 
-
 # ---------------------------------------------------------------------------
 # MCP server instance.
 # ---------------------------------------------------------------------------
 
 mcp = FastMCP("PokeLab")
 
+# ---------------------------------------------------------------------------
+# Type → visual style mapping
+# ---------------------------------------------------------------------------
+
+TYPE_STYLES = {
+    "Fire":      {"bg": "bg-orange-100",  "border": "border-orange-300", "symbol": "🔥"},
+    "Water":     {"bg": "bg-blue-100",    "border": "border-blue-300",   "symbol": "💧"},
+    "Lightning": {"bg": "bg-yellow-100",  "border": "border-yellow-300", "symbol": "⚡"},
+    "Grass":     {"bg": "bg-green-100",   "border": "border-green-300",  "symbol": "🌿"},
+    "Psychic":   {"bg": "bg-purple-100",  "border": "border-purple-300", "symbol": "🔮"},
+    "Fighting":  {"bg": "bg-red-100",     "border": "border-red-300",    "symbol": "👊"},
+    "Darkness":  {"bg": "bg-gray-800",    "border": "border-gray-600",   "symbol": "🌑"},
+    "Metal":     {"bg": "bg-slate-100",   "border": "border-slate-300",  "symbol": "⚙️"},
+    "Fairy":     {"bg": "bg-pink-100",    "border": "border-pink-300",   "symbol": "✨"},
+    "Dragon":    {"bg": "bg-indigo-100",  "border": "border-indigo-300", "symbol": "🐉"},
+    "Colorless": {"bg": "bg-gray-50",     "border": "border-gray-200",   "symbol": "⭕"},
+}
+
+RARITY_SYMBOL = {
+    "Common":    "●",
+    "Uncommon":  "◆",
+    "Rare":      "★",
+    "Rare Holo": "★✦",
+}
+
+
+def _type_style(types):
+    primary = (types or ["Colorless"])[0]
+    return TYPE_STYLES.get(primary, TYPE_STYLES["Colorless"])
+
+
+def _energy_symbols(cost):
+    return "".join(
+        TYPE_STYLES.get(c, TYPE_STYLES["Colorless"])["symbol"]
+        for c in cost
+    )
+
 
 # ===========================================================================
 # 1. INTERNET TOOL — Pokemon TCG API
 # ===========================================================================
-# Same shape as `fetch_url` from example_mcp_server.py, but specialized for
-# the Pokemon TCG API. Returns a normalized dict — only the fields we render.
+# Returns a normalized dict — only the fields we render.
 # Trimming the response keeps tokens down when the model passes the result
 # back to itself.
 # ---------------------------------------------------------------------------
@@ -100,11 +130,10 @@ def fetch_real_card(name: str) -> dict:
     headers = {}
     if api_key := os.getenv("POKEMON_TCG_API_KEY"):
         headers["X-Api-Key"] = api_key
-
     try:
         r = requests.get(
             POKE_TCG_BASE,
-            params={"q": f'name:{name}', "pageSize": 1, "orderBy": "set.releaseDate"},
+            params={"q": f"name:{name}", "pageSize": 1, "orderBy": "set.releaseDate"},
             headers=headers,
             timeout=10,
         )
@@ -122,14 +151,10 @@ def fetch_real_card(name: str) -> dict:
         "name": c["name"],
         "hp": c.get("hp", "?"),
         "types": c.get("types", []),
-        "subtitle": c.get("subtypes", ["Basic"])[0] if c.get("subtypes") else "Basic",
+        "subtitle": (c.get("subtypes") or ["Basic"])[0],
         "attacks": [
-            {
-                "name": a["name"],
-                "cost": a.get("cost", []),
-                "damage": a.get("damage", ""),
-                "text": a.get("text", ""),
-            }
+            {"name": a["name"], "cost": a.get("cost", []),
+             "damage": a.get("damage", ""), "text": a.get("text", "")}
             for a in c.get("attacks", [])
         ],
         "weakness": (
@@ -140,6 +165,7 @@ def fetch_real_card(name: str) -> dict:
         "set": c.get("set", {}).get("name", ""),
         "number": c.get("number", ""),
         "rarity": c.get("rarity", ""),
+        "image_url": c.get("images", {}).get("small", ""),
         "source": "pokemon_tcg_api",
     }
 
@@ -147,12 +173,11 @@ def fetch_real_card(name: str) -> dict:
 # ===========================================================================
 # 2. FILE CRUD TOOL — collection.json
 # ===========================================================================
-# Same shape as the note_* family from example_mcp_server.py: a single tool
-# dispatched by an `action` argument. JSON file storage instead of SQLite —
-# easier to eyeball during the demo (and easier to git diff).
+# A single tool dispatched by an `action` argument. JSON file storage instead
+# of SQLite — easier to eyeball during the demo (and easier to git diff).
 # ---------------------------------------------------------------------------
 
-def _load_collection() -> list[dict]:
+def _load_collection():
     if not COLLECTION_FILE.exists():
         return []
     try:
@@ -161,149 +186,185 @@ def _load_collection() -> list[dict]:
         return []
 
 
-def _save_collection(cards: list[dict]) -> None:
+def _save_collection(cards):
     COLLECTION_FILE.write_text(json.dumps(cards, indent=2), encoding="utf-8")
 
 
 @mcp.tool()
-def manage_collection(
-    action: str,
-    card: dict | None = None,
-    card_id: str | None = None,
-) -> str:
+def manage_collection(action: str, card: dict | None = None, card_id: str | None = None) -> str:
     """CRUD over the saved card collection.
-
-    Args:
-        action: One of "add", "list", "remove", "clear".
-        card:   For action="add" — the card dict from fetch_real_card or design_card.
-        card_id: For action="remove" — the id of the card to remove.
-
-    Returns:
-        A human-readable status string.
+    action: add | list | remove | clear
+    card: dict from fetch_real_card (for add)
+    card_id: string id (for remove)
     """
     cards = _load_collection()
-
     if action == "add":
         if not card or "id" not in card:
             return "ERROR: action=add requires a card dict with an 'id' field"
-        # Replace if id already present, else append (idempotent).
         cards = [c for c in cards if c.get("id") != card["id"]]
         cards.append(card)
         _save_collection(cards)
         return f"Saved {card.get('name', 'card')} (id={card['id']}). Collection has {len(cards)} cards."
-
     if action == "list":
         if not cards:
             return "Collection is empty."
-        names = ", ".join(f"{c['name']} ({c['id']})" for c in cards)
-        return f"{len(cards)} cards: {names}"
-
+        return ", ".join(f"{c['name']} ({c['id']})" for c in cards)
     if action == "remove":
         if not card_id:
             return "ERROR: action=remove requires a card_id"
-        before = len(cards)
         cards = [c for c in cards if c.get("id") != card_id]
         _save_collection(cards)
-        return f"Removed {card_id}. {len(cards)} cards remaining (was {before})."
-
+        return f"Removed {card_id}. {len(cards)} cards remaining."
     if action == "clear":
         _save_collection([])
         return "Collection cleared."
-
     return f"ERROR: unknown action {action!r}. Use add | list | remove | clear."
 
 
 # ===========================================================================
-# 3. PREFAB UI — `card_lab` and the shared card renderer
+# 2b. REFRESH IMAGES — backfill image_url for old saved cards
 # ===========================================================================
-# Same shape as `counter_card` from Lesson 03: @mcp.tool(app=True) returns a
-# PrefabApp. The renderer `_render_card` is also called from `design_card`
-# below, so real and generated cards look identical.
-# ---------------------------------------------------------------------------
 
-# Map Pokemon TCG types to a Prefab Badge variant. Prefab only supports a few
-# variants out of the box, so we use them deliberately.
-TYPE_TO_VARIANT = {
-    "Fire": "destructive",
-    "Fighting": "destructive",
-    "Water": "default",
-    "Electric": "warning",
-    "Lightning": "warning",
-    "Grass": "success",
-    "Psychic": "default",
-    "Fairy": "default",
-    "Dragon": "default",
-    "Darkness": "default",
-    "Metal": "default",
-    "Colorless": "default",
-}
+@mcp.tool()
+def refresh_collection_images() -> str:
+    """Re-fetch image URLs from the Pokemon TCG API for any saved card missing one.
+    Run this once if your collection was saved with the old server.py.
+    """
+    cards = _load_collection()
+    updated = 0
+    skipped = 0
+    headers = {}
+    if api_key := os.getenv("POKEMON_TCG_API_KEY"):
+        headers["X-Api-Key"] = api_key
 
+    for card in cards:
+        if card.get("image_url") or card.get("source") == "designed_by_llm":
+            skipped += 1
+            continue
+        card_id = card.get("id", "")
+        try:
+            r = requests.get(f"{POKE_TCG_BASE}/{card_id}", headers=headers, timeout=10)
+            if r.status_code == 200:
+                img = r.json().get("data", {}).get("images", {}).get("small", "")
+                if img:
+                    card["image_url"] = img
+                    updated += 1
+            time.sleep(0.1)
+        except Exception:
+            pass
+
+    _save_collection(cards)
+    return f"Done. Updated {updated} cards with images. Skipped {skipped}."
+
+
+# ===========================================================================
+# 3. PREFAB UI — redesigned card renderer + card_lab grid
+# ===========================================================================
 
 def _render_card(card: dict) -> None:
-    """Render one Pokemon card using Prefab components.
+    """Render one Pokemon card with type colours, image, attacks, and footer."""
+    types    = card.get("types") or ["Colorless"]
+    style    = _type_style(types)
+    bg       = style["bg"]
+    symbol   = style["symbol"]
+    is_dark  = types[0] == "Darkness"
+    text_cls = "text-white" if is_dark else ""
+    name     = card.get("name", "Unknown")
+    hp       = card.get("hp", "?")
+    rarity   = card.get("rarity", "")
+    rarity_sym = RARITY_SYMBOL.get(rarity, "")
 
-    This is the heart of the project — both real and LLM-designed cards
-    pass through here, so they look the same in the UI.
-    """
-    types = card.get("types") or ["Colorless"]
-    type_str = " / ".join(types)
-    primary_variant = TYPE_TO_VARIANT.get(types[0], "default")
+    with Card(css_class="overflow-hidden shadow-md hover:shadow-xl transition-shadow duration-200"):
 
-    with Card():
-        with CardHeader():
-            with Row(gap=2):
-                CardTitle(card["name"])
-                Badge(f"HP {card.get('hp', '?')}", variant="default")
-                Badge(type_str, variant=primary_variant)
-        with CardContent():
-            with Column(gap=3):
-                # Subtitle line: subtype + set + number
-                meta_bits = []
-                if card.get("subtitle"):
-                    meta_bits.append(card["subtitle"])
-                if card.get("set"):
-                    meta_bits.append(card["set"])
-                if card.get("number"):
-                    meta_bits.append(f"#{card['number']}")
-                if meta_bits:
-                    Muted(" · ".join(meta_bits))
+        # — Coloured header band ———————————————————————————————————————————
+        with CardHeader(css_class=f"{bg} border-b {style['border']} pb-2"):
+            with Row(css_class="justify-between items-start"):
+                with Column(css_class="gap-0"):
+                    with Row(css_class="items-center gap-1"):
+                        Text(symbol, css_class="text-lg")
+                        Text(name, css_class=f"text-base font-bold {text_cls}")
+                    if card.get("subtitle"):
+                        Muted(card["subtitle"],
+                              css_class=f"text-xs {'text-gray-300' if is_dark else ''}")
+                with Column(css_class="items-end gap-0"):
+                    Text(f"{hp} HP",
+                         css_class=f"text-xl font-extrabold {'text-white' if is_dark else 'text-gray-700'}")
+                    if rarity_sym:
+                        Muted(rarity_sym, css_class="text-xs text-right")
 
-                # Attacks
-                for atk in card.get("attacks", []):
-                    cost = atk.get("cost") or []
-                    cost_str = " ".join(cost) if cost else "—"
-                    with Row(gap=3):
-                        Text(f"⚡ {atk['name']}")
-                        Muted(f"[{cost_str}]")
-                        Text(str(atk.get("damage") or "—"))
-                    if atk.get("text"):
-                        Muted(atk["text"])
+        # — Card image ———————————————————————————————————————————————————
+        img_url = card.get("image_url", "")
+        if img_url:
+            with CardContent(css_class="p-0"):
+                Image(
+                    src=img_url,
+                    alt=f"{name} Pokemon card",
+                    width="100%",
+                    height="auto",
+                    css_class="object-contain bg-gray-50",
+                )
+        else:
+            with CardContent(css_class=f"p-0 {bg} h-28 flex items-center justify-center"):
+                Text(symbol, css_class="text-5xl opacity-30")
 
-                # Weakness
-                if card.get("weakness"):
-                    w = card["weakness"]
-                    Muted(f"Weakness: {w.get('type', '')} {w.get('value', '')}")
+        # — Attacks ——————————————————————————————————————————————————————
+        with CardContent(css_class="pt-2 pb-1 px-3"):
+            attacks = card.get("attacks", [])
+            if attacks:
+                with Column(css_class="gap-2"):
+                    for atk in attacks:
+                        cost_str = _energy_symbols(atk.get("cost", []))
+                        dmg = atk.get("damage", "")
+                        with Column(css_class="gap-0.5"):
+                            with Row(css_class="justify-between items-center"):
+                                with Row(css_class="gap-1 items-center"):
+                                    if cost_str:
+                                        Text(cost_str, css_class="text-sm")
+                                    Text(atk["name"], css_class="font-semibold text-sm")
+                                if dmg:
+                                    Text(dmg, css_class="font-bold text-sm")
+                            if atk.get("text"):
+                                Muted(atk["text"], css_class="text-xs leading-tight")
+            else:
+                Muted("No attacks", css_class="text-xs italic")
 
-                # Source tag — makes it obvious in the UI which cards were generated
-                if card.get("source") == "designed_by_llm":
-                    Badge("Custom — designed by LLM", variant="success")
+        # — Footer ———————————————————————————————————————————————————————
+        with CardContent(css_class="pt-1 pb-2 px-3"):
+            Separator(css_class="mb-2")
+            with Row(css_class="justify-between items-center"):
+                w = card.get("weakness")
+                if w:
+                    weak_sym = TYPE_STYLES.get(w.get("type", ""), TYPE_STYLES["Colorless"])["symbol"]
+                    Muted(f"Weak: {weak_sym} {w.get('value', '')}", css_class="text-xs")
+                else:
+                    Muted("Weak: —", css_class="text-xs")
+                set_name = card.get("set", "")
+                number   = card.get("number", "")
+                if set_name or number:
+                    Muted(f"{set_name} #{number}" if number else set_name,
+                          css_class="text-xs text-right")
+            if card.get("source") == "designed_by_llm":
+                Badge("✦ Custom", variant="secondary", css_class="text-xs mt-1")
 
 
 @mcp.tool(app=True)
 def card_lab() -> PrefabApp:
-    """Render my Pokemon card collection as an interactive Prefab dashboard."""
+    """Render my Pokémon card collection as a visual grid with card images."""
     cards = _load_collection()
 
-    with PrefabApp(css_class="max-w-2xl mx-auto p-6") as app:
+    with PrefabApp(css_class="max-w-5xl mx-auto p-6") as app:
         with Card():
             with CardHeader():
-                CardTitle("My Pokémon Collection")
-                Muted(f"{len(cards)} cards in sandbox/collection.json")
+                Text("✦ My Pokémon Collection",
+                     css_class="text-xl font-bold")
+                Muted(f"{len(cards)} card{'s' if len(cards) != 1 else ''} · sandbox/collection.json")
             with CardContent():
                 if not cards:
-                    Muted("(empty — call fetch_real_card or design_card first)")
+                    with Column(css_class="items-center py-12 gap-2"):
+                        Text("🃏", css_class="text-6xl opacity-30")
+                        Muted("No cards yet. Call fetch_real_card then manage_collection to add some.")
                 else:
-                    with Column(gap=4):
+                    with Grid(columns={"default": 1, "md": 2, "lg": 3}, gap=4):
                         for card in cards:
                             _render_card(card)
 
@@ -311,13 +372,8 @@ def card_lab() -> PrefabApp:
 
 
 # ===========================================================================
-# 4. STRETCH — `design_card` (Talk-to-App pattern from Lesson 04D)
+# 4. DESIGN CARD — Talk-to-App stretch tool
 # ===========================================================================
-# The user describes a card in English. We ask Gemini to fill in a JSON
-# spec — the same task-shape as PLANNER_PROMPT in prompt_to_app.py. We
-# save the result to the collection and render it through the same
-# `_render_card` we use for real cards.
-# ---------------------------------------------------------------------------
 
 CARD_DESIGNER_PROMPT = """You design Pokemon Trading Card Game cards. Given the user's
 description, respond with EXACTLY ONE JSON object describing one card.
@@ -326,50 +382,38 @@ Required shape:
 {{
   "name": "<short evocative name, 1-2 words>",
   "hp": <integer between 30 and 220>,
-  "types": [<one or two of: Fire, Water, Grass, Electric, Psychic,
+  "types": [<one or two of: Fire, Water, Grass, Lightning, Psychic,
                             Fighting, Darkness, Metal, Fairy, Dragon, Colorless>],
-  "subtitle": "<flavor subtitle, e.g. 'Candle Sprite Pokémon'>",
+  "subtitle": "<flavor subtitle, e.g. 'Candle Sprite Pokemon'>",
   "attacks": [
     {{"name": "<short>", "cost": [<types from same list>], "damage": "<e.g. '20' or '40+'>",
       "text": "<one short rules sentence>"}}
-    // 1 or 2 attacks total
   ],
   "weakness": {{"type": "<type>", "value": "<e.g. '+20' or 'x2'>"}},
   "flavor": "<one-line flavor text>"
 }}
 
-Balance guidelines (keep cards reasonable):
-- Basic Pokemon: 30-90 HP, attacks deal 10-40 damage with 1-2 energy cost.
-- HP and damage should scale together — bigger HP = bigger attacks but more cost.
-- Cost length should roughly match damage tier.
-
-Respond with the JSON object only — no markdown fences, no prose, no commentary.
+Balance: Basic ~30-90 HP, Stage 2 ~100-170 HP. Cost and damage should scale together.
+Respond with JSON only - no markdown fences, no prose.
 
 User request: {prompt}
 """
 
 
 def _call_gemini(prompt: str) -> str:
-    """Call Gemini and return the raw text. Lazy-imported so the server
-    starts even without google-genai installed (you only need it for design_card).
-    """
     from google import genai
-
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY not set in .env — design_card needs it")
-
-    model = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite-preview")
+        raise RuntimeError("GEMINI_API_KEY not set in .env")
     client = genai.Client(api_key=api_key)
+    model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
     response = client.models.generate_content(model=model, contents=prompt)
     return (response.text or "").strip()
 
 
 def _strip_fences(raw: str) -> str:
-    """Tolerate the LLM occasionally wrapping JSON in markdown code fences."""
     raw = raw.strip()
     if raw.startswith("```"):
-        # Strip ```json\n ... \n``` or ``` ... ```
         raw = raw.strip("`")
         if raw.lower().startswith("json"):
             raw = raw[4:]
@@ -378,29 +422,22 @@ def _strip_fences(raw: str) -> str:
 
 
 def _error_card_app(message: str) -> PrefabApp:
-    """When something goes wrong, render a small explanatory card instead of crashing."""
     with PrefabApp(css_class="max-w-md mx-auto p-6") as app:
         with Card():
             with CardHeader():
-                CardTitle("Card design failed")
+                Text("Card design failed", css_class="font-bold")
             with CardContent():
-                with Column(gap=2):
+                with Column(css_class="gap-2"):
                     Muted(message)
-                    Muted("Try rephrasing your request and call design_card again.")
+                    Muted("Try rephrasing and call design_card again.")
     return app
 
 
 @mcp.tool(app=True)
 def design_card(prompt: str) -> PrefabApp:
-    """Design a custom Pokemon card from an English description, using an LLM.
-
-    The LLM fills in a structured card spec (NOT Prefab code). Python takes
-    that spec, normalizes it, saves it to the collection, and renders it
-    through the same _render_card function used for real cards.
-
-    Args:
-        prompt: An English description like "a fire-fairy hybrid called
-                Embersprite, around 80 HP, attacks themed on temple flames".
+    """Design a custom Pokemon card from an English description using an LLM.
+    The LLM fills in a JSON spec; Python renders it through _render_card().
+    Example: 'a fire-fairy hybrid called Embersprite, 80 HP, temple flame attacks'
     """
     try:
         raw = _call_gemini(CARD_DESIGNER_PROMPT.format(prompt=prompt))
@@ -410,12 +447,8 @@ def design_card(prompt: str) -> PrefabApp:
     try:
         spec = json.loads(_strip_fences(raw))
     except json.JSONDecodeError as e:
-        return _error_card_app(
-            f"Couldn't parse the LLM's response as JSON ({e}). "
-            f"Got: {raw[:200]}"
-        )
+        return _error_card_app(f"Couldn't parse LLM response as JSON ({e}). Got: {raw[:200]}")
 
-    # Normalize into our shared card shape so _render_card works.
     cards = _load_collection()
     next_id = sum(1 for c in cards if c.get("source") == "designed_by_llm") + 1
     card = {
@@ -423,43 +456,35 @@ def design_card(prompt: str) -> PrefabApp:
         "name": str(spec.get("name", "Unnamed")),
         "hp": str(spec.get("hp", "?")),
         "types": spec.get("types", ["Colorless"]),
-        "subtitle": str(spec.get("subtitle", "Custom Pokémon")),
+        "subtitle": str(spec.get("subtitle", "Custom Pokemon")),
         "attacks": [
-            {
-                "name": str(a.get("name", "Attack")),
-                "cost": a.get("cost", []),
-                "damage": str(a.get("damage", "")),
-                "text": str(a.get("text", "")),
-            }
+            {"name": str(a.get("name", "Attack")), "cost": a.get("cost", []),
+             "damage": str(a.get("damage", "")), "text": str(a.get("text", ""))}
             for a in spec.get("attacks", [])
         ],
         "weakness": spec.get("weakness"),
         "set": "Custom Lab",
-        "number": f"custom-{next_id:03d}",
+        "number": f"C{next_id:03d}",
         "rarity": "Custom",
         "flavor": spec.get("flavor", ""),
+        "image_url": "",
         "source": "designed_by_llm",
     }
 
-    # Save to collection — the new card will appear next time card_lab is called.
     cards.append(card)
     _save_collection(cards)
 
-    # Render this single card now.
-    with PrefabApp(css_class="max-w-md mx-auto p-6") as app:
+    with PrefabApp(css_class="max-w-sm mx-auto p-6") as app:
         _render_card(card)
-        Muted(f"Saved as {card['id']}. Call card_lab to see your full collection.")
+        Muted(f"Saved as {card['id']}. Call card_lab() to see your full collection.",
+              css_class="text-xs text-center mt-2")
 
     return app
 
 
 # ===========================================================================
-# 5. PROMPT — a slash-command the host can surface to the user
+# 5. PROMPT — slash command
 # ===========================================================================
-# Bonus: same shape as the @mcp.prompt() examples in example_mcp_server.py.
-# This makes "/design_card_walkthrough" appear as a slash command in
-# Claude Desktop's prompt menu, walking the user through the demo.
-# ---------------------------------------------------------------------------
 
 @mcp.prompt()
 def design_card_walkthrough() -> str:
@@ -468,16 +493,13 @@ def design_card_walkthrough() -> str:
         "I want to try the PokéLab MCP server. Please:\n"
         "1. Fetch a Pikachu and a Charizard from the Pokemon TCG API.\n"
         "2. Save both to my collection.\n"
-        "3. Show me my collection in a Prefab dashboard.\n"
-        "4. Then design a custom card: a fire-fairy hybrid called "
-        "'Embersprite' with around 80 HP and attacks themed on temple candles.\n"
+        "3. Call refresh_collection_images so all cards have their artwork.\n"
+        "4. Show me my collection in a Prefab dashboard.\n"
+        "5. Then design a custom card: a fire-fairy hybrid called 'Embersprite'"
+        " with around 80 HP and attacks themed on temple candles.\n"
     )
 
 
-# ---------------------------------------------------------------------------
-# Entry point.
-# ---------------------------------------------------------------------------
-
 if __name__ == "__main__":
-    print(f"PokéLab starting — sandbox: {SANDBOX}", file=sys.stderr)
+    print(f"PokeLab starting -- sandbox: {SANDBOX}", file=sys.stderr)
     mcp.run()
