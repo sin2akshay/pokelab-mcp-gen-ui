@@ -247,9 +247,9 @@ If you trace the code in `server.py`, every section corresponds to a Session 4 l
 | Code section | Came from |
 |---|---|
 | `from fastmcp import FastMCP`, `mcp.run()` | Lesson 02 |
-| `requests.get(...)`, sandbox folder | Lesson 01 |
+| HTTP fetch helper, sandbox folder | Lesson 01 |
 | `_load_collection`/`_save_collection` (JSON) | Lesson 01 (`note_*` family, simplified) |
-| `@mcp.tool(app=True)` returning `PrefabApp` | Lesson 03 |
+| `@mcp.tool(app=True)` returning `PrefabApp` | Lesson 04C |
 | `with Card(): with CardHeader(): ...` DSL | Lesson 04A |
 | `Badge`, `Muted`, `Row`, `Column`, `Tab` | Lesson 04D's widget catalog |
 | `client.models.generate_content(...)` | Lesson 03 (`AgenticMCPUse.py`), 04D |

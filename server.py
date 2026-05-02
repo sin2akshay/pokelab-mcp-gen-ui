@@ -2,7 +2,7 @@
 PokéLab — an MCP server that fetches, saves, designs, and renders Pokemon cards.
 
 Stitches together every Session 4 pattern:
-  Lesson 01  @mcp.tool(), file CRUD, sandbox folder, requests.get
+    Lesson 01  @mcp.tool(), file CRUD, sandbox folder, HTTP fetch
   Lesson 02  mcp.run() entry point, stdio transport
   Lesson 03  Gemini integration (inside the server this time)
   Lesson 04A Prefab DSL, nested with-blocks
@@ -30,20 +30,22 @@ import os
 import sys
 import time
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
-import requests
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from prefab_ui.app import PrefabApp
 from prefab_ui.components import (
     Badge,
     Card,
+    CardDescription,
     CardContent,
     CardHeader,
     CardTitle,
     Column,
     Grid,
-    H3,
     Image,
     Muted,
     Row,
@@ -116,6 +118,22 @@ def _energy_symbols(cost):
 POKE_TCG_BASE = "https://api.pokemontcg.io/v2/cards"
 
 
+def _json_get(
+    url: str,
+    *,
+    params: dict[str, str | int] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: float = 10,
+) -> tuple[int, dict]:
+    if params:
+        url = f"{url}?{urlencode(params)}"
+
+    request = Request(url, headers=headers or {})
+    with urlopen(request, timeout=timeout) as response:
+        payload = response.read().decode("utf-8")
+        return response.status, json.loads(payload)
+
+
 @mcp.tool()
 def fetch_real_card(name: str) -> dict:
     """Fetch a real Pokemon card by name from the Pokemon TCG API.
@@ -131,17 +149,16 @@ def fetch_real_card(name: str) -> dict:
     if api_key := os.getenv("POKEMON_TCG_API_KEY"):
         headers["X-Api-Key"] = api_key
     try:
-        r = requests.get(
+        _, payload = _json_get(
             POKE_TCG_BASE,
             params={"q": f"name:{name}", "pageSize": 1, "orderBy": "set.releaseDate"},
             headers=headers,
             timeout=10,
         )
-        r.raise_for_status()
-    except requests.RequestException as e:
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as e:
         return {"error": f"Network error fetching {name!r}: {e}"}
 
-    cards = r.json().get("data", [])
+    cards = payload.get("data", [])
     if not cards:
         return {"error": f"No card found for {name!r}"}
 
@@ -243,9 +260,13 @@ def refresh_collection_images() -> str:
             continue
         card_id = card.get("id", "")
         try:
-            r = requests.get(f"{POKE_TCG_BASE}/{card_id}", headers=headers, timeout=10)
-            if r.status_code == 200:
-                img = r.json().get("data", {}).get("images", {}).get("small", "")
+            status, payload = _json_get(
+                f"{POKE_TCG_BASE}/{card_id}",
+                headers=headers,
+                timeout=10,
+            )
+            if status == 200:
+                img = payload.get("data", {}).get("images", {}).get("small", "")
                 if img:
                     card["image_url"] = img
                     updated += 1
@@ -277,16 +298,18 @@ def _render_card(card: dict) -> None:
     with Card(css_class="overflow-hidden shadow-md hover:shadow-xl transition-shadow duration-200"):
 
         # — Coloured header band ———————————————————————————————————————————
-        with CardHeader(css_class=f"{bg} border-b {style['border']} pb-2"):
-            with Row(css_class="justify-between items-start"):
-                with Column(css_class="gap-0"):
-                    with Row(css_class="items-center gap-1"):
+        with CardHeader(css_class=f"{bg} border-b {style['border']}"):
+            with Row(justify="between", align="start"):
+                with Column(gap=0):
+                    with Row(gap=1, align="center"):
                         Text(symbol, css_class="text-lg")
-                        Text(name, css_class=f"text-base font-bold {text_cls}")
+                        CardTitle(name, css_class=f"text-base {text_cls}")
                     if card.get("subtitle"):
-                        Muted(card["subtitle"],
-                              css_class=f"text-xs {'text-gray-300' if is_dark else ''}")
-                with Column(css_class="items-end gap-0"):
+                        CardDescription(
+                            card["subtitle"],
+                            css_class=f"text-xs {'text-gray-300' if is_dark else ''}",
+                        )
+                with Column(gap=0, align="end"):
                     Text(f"{hp} HP",
                          css_class=f"text-xl font-extrabold {'text-white' if is_dark else 'text-gray-700'}")
                     if rarity_sym:
@@ -295,29 +318,30 @@ def _render_card(card: dict) -> None:
         # — Card image ———————————————————————————————————————————————————
         img_url = card.get("image_url", "")
         if img_url:
-            with CardContent(css_class="p-0"):
+            with CardContent():
                 Image(
                     src=img_url,
                     alt=f"{name} Pokemon card",
                     width="100%",
                     height="auto",
-                    css_class="object-contain bg-gray-50",
+                    css_class="w-full object-contain bg-gray-50",
                 )
         else:
-            with CardContent(css_class=f"p-0 {bg} h-28 flex items-center justify-center"):
-                Text(symbol, css_class="text-5xl opacity-30")
+            with CardContent():
+                with Column(align="center", justify="center", css_class=f"{bg} min-h-28"):
+                    Text(symbol, css_class="text-5xl opacity-30")
 
         # — Attacks ——————————————————————————————————————————————————————
-        with CardContent(css_class="pt-2 pb-1 px-3"):
+        with CardContent():
             attacks = card.get("attacks", [])
             if attacks:
-                with Column(css_class="gap-2"):
+                with Column(gap=2):
                     for atk in attacks:
                         cost_str = _energy_symbols(atk.get("cost", []))
                         dmg = atk.get("damage", "")
-                        with Column(css_class="gap-0.5"):
-                            with Row(css_class="justify-between items-center"):
-                                with Row(css_class="gap-1 items-center"):
+                        with Column(gap=1):
+                            with Row(justify="between", align="center"):
+                                with Row(gap=1, align="center"):
                                     if cost_str:
                                         Text(cost_str, css_class="text-sm")
                                     Text(atk["name"], css_class="font-semibold text-sm")
@@ -329,9 +353,9 @@ def _render_card(card: dict) -> None:
                 Muted("No attacks", css_class="text-xs italic")
 
         # — Footer ———————————————————————————————————————————————————————
-        with CardContent(css_class="pt-1 pb-2 px-3"):
+        with CardContent():
             Separator(css_class="mb-2")
-            with Row(css_class="justify-between items-center"):
+            with Row(justify="between", align="center"):
                 w = card.get("weakness")
                 if w:
                     weak_sym = TYPE_STYLES.get(w.get("type", ""), TYPE_STYLES["Colorless"])["symbol"]
@@ -343,6 +367,8 @@ def _render_card(card: dict) -> None:
                 if set_name or number:
                     Muted(f"{set_name} #{number}" if number else set_name,
                           css_class="text-xs text-right")
+            if card.get("flavor"):
+                Muted(card["flavor"], css_class="text-xs italic mt-2 block")
             if card.get("source") == "designed_by_llm":
                 Badge("✦ Custom", variant="secondary", css_class="text-xs mt-1")
 
@@ -352,21 +378,23 @@ def card_lab() -> PrefabApp:
     """Render my Pokémon card collection as a visual grid with card images."""
     cards = _load_collection()
 
-    with PrefabApp(css_class="max-w-5xl mx-auto p-6") as app:
-        with Card():
-            with CardHeader():
-                Text("✦ My Pokémon Collection",
-                     css_class="text-xl font-bold")
-                Muted(f"{len(cards)} card{'s' if len(cards) != 1 else ''} · sandbox/collection.json")
-            with CardContent():
-                if not cards:
-                    with Column(css_class="items-center py-12 gap-2"):
-                        Text("🃏", css_class="text-6xl opacity-30")
-                        Muted("No cards yet. Call fetch_real_card then manage_collection to add some.")
-                else:
-                    with Grid(columns={"default": 1, "md": 2, "lg": 3}, gap=4):
-                        for card in cards:
-                            _render_card(card)
+    with PrefabApp() as app:
+        with Column(gap=4, css_class="max-w-5xl mx-auto p-6"):
+            with Card():
+                with CardHeader():
+                    CardTitle("✦ My Pokémon Collection", css_class="text-xl")
+                    CardDescription(
+                        f"{len(cards)} card{'s' if len(cards) != 1 else ''} · sandbox/collection.json"
+                    )
+                with CardContent():
+                    if not cards:
+                        with Column(gap=2, align="center", css_class="py-12"):
+                            Text("🃏", css_class="text-6xl opacity-30")
+                            Muted("No cards yet. Call fetch_real_card then manage_collection to add some.")
+                    else:
+                        with Grid(columns=1, gap=4, css_class="md:grid-cols-2 lg:grid-cols-3"):
+                            for card in cards:
+                                _render_card(card)
 
     return app
 
@@ -422,14 +450,14 @@ def _strip_fences(raw: str) -> str:
 
 
 def _error_card_app(message: str) -> PrefabApp:
-    with PrefabApp(css_class="max-w-md mx-auto p-6") as app:
-        with Card():
-            with CardHeader():
-                Text("Card design failed", css_class="font-bold")
-            with CardContent():
-                with Column(css_class="gap-2"):
+    with PrefabApp() as app:
+        with Column(gap=4, css_class="max-w-md mx-auto p-6"):
+            with Card():
+                with CardHeader():
+                    CardTitle("Card design failed")
+                    CardDescription("Try rephrasing and call design_card again.")
+                with CardContent():
                     Muted(message)
-                    Muted("Try rephrasing and call design_card again.")
     return app
 
 
@@ -474,10 +502,13 @@ def design_card(prompt: str) -> PrefabApp:
     cards.append(card)
     _save_collection(cards)
 
-    with PrefabApp(css_class="max-w-sm mx-auto p-6") as app:
-        _render_card(card)
-        Muted(f"Saved as {card['id']}. Call card_lab() to see your full collection.",
-              css_class="text-xs text-center mt-2")
+    with PrefabApp() as app:
+        with Column(gap=2, css_class="max-w-sm mx-auto p-6"):
+            _render_card(card)
+            Muted(
+                f"Saved as {card['id']}. Call card_lab() to see your full collection.",
+                css_class="text-xs text-center mt-2",
+            )
 
     return app
 
