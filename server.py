@@ -11,6 +11,7 @@ Stitches together every Session 4 pattern:
 
 Tools exposed:
   fetch_real_card(name)       — internet:    Pokemon TCG API (includes card image)
+    preview_real_card(name)     — Prefab UI:   previews one fetched card with optional save
   manage_collection(action,…) — file CRUD:   sandbox/collection.json
   refresh_collection_images() — internet:    backfills image URLs for old saved cards
   card_lab()                  — Prefab UI:   renders collection as a styled grid
@@ -394,6 +395,13 @@ def _save_collection(cards) -> bool:
         return False
 
 
+def _collection_has_card(card_id: str, cards: list[dict] | None = None) -> bool:
+    if not card_id:
+        return False
+    existing_cards = cards if cards is not None else _load_collection()
+    return any(str(card.get("id", "")) == card_id for card in existing_cards)
+
+
 @mcp.tool()
 def manage_collection(action: str, card: dict | None = None, card_id: str | None = None) -> str:
     """CRUD over the saved card collection.
@@ -502,7 +510,26 @@ def refresh_collection_images() -> str:
 # 3. PREFAB UI — redesigned card renderer + card_lab grid
 # ===========================================================================
 
-def _render_card(card: dict) -> None:
+def _save_fetched_card_action(card: dict) -> CallTool:
+    card_name = str(card.get("name", "Card")).strip() or "Card"
+    return CallTool(
+        "manage_collection",
+        arguments={"action": "add", "card": card},
+        on_success=ShowToast(
+            "Card saved",
+            description=f"{card_name} is now in sandbox/collection.json.",
+            variant="success",
+        ),
+        on_error=ShowToast("Save failed", description="{{ $error }}", variant="error"),
+    )
+
+
+def _render_card(
+    card: dict,
+    *,
+    save_action: CallTool | None = None,
+    already_saved: bool = False,
+) -> None:
     """Render one Pokemon card with type colours, image, attacks, and footer."""
     types    = card.get("types") or ["Colorless"]
     style    = _type_style(types)
@@ -604,6 +631,14 @@ def _render_card(card: dict) -> None:
                 Muted(card["flavor"], css_class="text-xs italic mt-2 block")
             if card.get("source") in CUSTOM_CARD_SOURCES:
                 Badge("✦ Custom", variant="secondary", css_class="text-xs mt-1")
+            if save_action is not None or already_saved:
+                with Row(justify="between", align="center", css_class="mt-3"):
+                    if already_saved:
+                        Badge("Saved to collection", variant="secondary", css_class="text-xs")
+                    else:
+                        Muted("Not in collection yet.", css_class="text-xs")
+                    if save_action is not None:
+                        Button("Save to collection", icon="save", variant="success", on_click=save_action)
 
 
 @mcp.tool(app=True)
@@ -628,6 +663,38 @@ def card_lab() -> PrefabApp:
                         with Grid(columns=1, gap=4, css_class="md:grid-cols-2 lg:grid-cols-3"):
                             for card in cards:
                                 _render_card(card)
+
+    return app
+
+
+@mcp.tool(app=True)
+def preview_real_card(name: str) -> PrefabApp:
+    """Fetch a real Pokemon card and preview it with an optional save action."""
+    card = fetch_real_card(name)
+    already_saved = False
+
+    if "error" not in card:
+        cards = _load_collection()
+        already_saved = _collection_has_card(str(card.get("id", "")), cards)
+
+    with PrefabApp() as app:
+        with Column(gap=4, css_class="max-w-3xl mx-auto p-6"):
+            with Column(gap=1):
+                Text("Pokemon TCG preview", css_class="text-2xl font-bold")
+                Muted("Fetched live from the Pokemon TCG API. Save it only if you want to keep it.")
+
+            if "error" in card:
+                with Card(css_class="border border-red-200 shadow-sm"):
+                    with CardHeader():
+                        CardTitle("Could not fetch card", css_class="text-lg text-red-700")
+                    with CardContent():
+                        Muted(card["error"], css_class="text-sm text-red-700")
+            else:
+                _render_card(
+                    card,
+                    save_action=None if already_saved else _save_fetched_card_action(card),
+                    already_saved=already_saved,
+                )
 
     return app
 
