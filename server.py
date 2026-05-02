@@ -33,6 +33,7 @@ import sys
 import time
 from html import escape
 from pathlib import Path
+from typing import Annotated
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
@@ -264,6 +265,10 @@ def _card_image_url(card: dict) -> str:
 # ---------------------------------------------------------------------------
 
 POKE_TCG_BASE = "https://api.pokemontcg.io/v2/cards"
+POKE_TCG_API_TIMEOUT = 20
+POKE_TCG_API_RETRY_TIMEOUTS = (20, 35)
+POKE_TCG_RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
+POKE_TCG_SEARCH_FALLBACK_PAGE_SIZES = (3, 1)
 
 
 def _json_get(
@@ -271,7 +276,7 @@ def _json_get(
     *,
     params: dict[str, str | int] | None = None,
     headers: dict[str, str] | None = None,
-    timeout: float = 10,
+    timeout: float = POKE_TCG_API_TIMEOUT,
 ) -> tuple[int, dict]:
     if params:
         url = f"{url}?{urlencode(params)}"
@@ -281,6 +286,32 @@ def _json_get(
     with urlopen(request, timeout=timeout) as response:
         payload = response.read().decode("utf-8")
         return response.status, json.loads(payload)
+
+
+def _json_get_with_retry(
+    url: str,
+    *,
+    params: dict[str, str | int] | None = None,
+    headers: dict[str, str] | None = None,
+    retry_timeouts: tuple[float, ...] = POKE_TCG_API_RETRY_TIMEOUTS,
+) -> tuple[int, dict]:
+    last_error: Exception | None = None
+
+    for timeout in retry_timeouts:
+        try:
+            return _json_get(url, params=params, headers=headers, timeout=timeout)
+        except HTTPError as error:
+            last_error = error
+            if error.code not in POKE_TCG_RETRYABLE_STATUS_CODES or timeout == retry_timeouts[-1]:
+                raise
+        except (URLError, TimeoutError, OSError) as error:
+            last_error = error
+            if timeout == retry_timeouts[-1]:
+                raise
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Pokemon TCG fetch failed without an exception")
 
 
 def _fetch_image_data_uri(url: str, *, timeout: float = 10) -> str:
@@ -361,21 +392,37 @@ def _lookup_real_cards(name: str, *, page_size: int = 1) -> list[dict] | dict:
     if not query:
         return {"error": "Pokemon name is required."}
 
-    try:
-        _, payload = _json_get(
-            POKE_TCG_BASE,
-            params={"q": f"name:{query}", "pageSize": page_size, "orderBy": "set.releaseDate"},
-            headers=_pokemon_tcg_headers(),
-            timeout=10,
+    payload: dict | None = None
+    fallback_page_sizes = [page_size]
+    if page_size > 1:
+        fallback_page_sizes.extend(
+            size for size in POKE_TCG_SEARCH_FALLBACK_PAGE_SIZES
+            if size < page_size and size not in fallback_page_sizes
         )
+
+    try:
+        for candidate_page_size in fallback_page_sizes:
+            try:
+                _, payload = _json_get_with_retry(
+                    POKE_TCG_BASE,
+                    params={"q": f"name:{query}", "pageSize": candidate_page_size, "orderBy": "set.releaseDate"},
+                    headers=_pokemon_tcg_headers(),
+                )
+                break
+            except (URLError, TimeoutError, OSError):
+                if candidate_page_size == fallback_page_sizes[-1]:
+                    raise
     except HTTPError as e:
         return {"error": f"Pokemon TCG API returned HTTP {e.code} for {query!r}: {e.reason}"}
-    except (URLError, TimeoutError) as e:
+    except (URLError, TimeoutError, OSError) as e:
         return {"error": f"Network error fetching {query!r}: {e}"}
     except json.JSONDecodeError as e:
         return {"error": f"Invalid JSON from Pokemon TCG API for {query!r}: {e}"}
     except Exception as e:  # pragma: no cover - defensive
         return {"error": f"Unexpected error fetching {query!r}: {e}"}
+
+    if payload is None:
+        return {"error": f"No response returned for {query!r}"}
 
     if not isinstance(payload, dict):
         return {"error": f"Unexpected response shape for {query!r}"}
@@ -388,8 +435,17 @@ def _lookup_real_cards(name: str, *, page_size: int = 1) -> list[dict] | dict:
     return [_normalize_real_card(card, default_name) for card in cards]
 
 
-@mcp.tool()
-def fetch_real_card(name: str) -> dict:
+@mcp.tool(
+    description="Fetch one live Pokemon TCG card as structured data. Use this for raw data or automation flows, not for opening the visual search UI or viewing the saved collection.",
+    annotations={
+        "title": "Fetch One Live Card",
+        "readOnlyHint": True,
+        "openWorldHint": True,
+    },
+)
+def fetch_real_card(
+    name: Annotated[str, "Pokemon name to look up against the live Pokemon TCG API, such as 'charizard' or 'pikachu'."]
+) -> dict:
     """Fetch a real Pokemon card by name from the Pokemon TCG API.
 
     Args:
@@ -514,10 +570,9 @@ def refresh_collection_images() -> str:
             failed += 1
             continue
         try:
-            status, payload = _json_get(
+            status, payload = _json_get_with_retry(
                 f"{POKE_TCG_BASE}/{card_id}",
                 headers=headers,
-                timeout=10,
             )
             if status == 200 and isinstance(payload, dict):
                 img = (payload.get("data") or {}).get("images", {}).get("small", "")
@@ -577,19 +632,175 @@ def _attack_slots(attacks: list[dict], *, limit: int = 2) -> list[dict | None]:
     return visible + [None] * max(0, limit - len(visible))
 
 
+def _is_dark_type(types) -> bool:
+    primary = (types or ["Colorless"])[0]
+    return primary == "Darkness"
+
+
+def _modifier_summary(label: str, modifier: dict | None) -> str:
+    modifier_type = str((modifier or {}).get("type", "")).strip()
+    modifier_value = str((modifier or {}).get("value", "")).strip() or "—"
+    if not modifier_type:
+        return f"{label}: —"
+    symbol = TYPE_STYLES.get(modifier_type, TYPE_STYLES["Colorless"])["symbol"]
+    return f"{label}: {symbol} {modifier_value}"
+
+
 def _render_modifier_panel(label: str, modifier: dict | None, *, compact: bool = False) -> None:
     modifier_type = str((modifier or {}).get("type", "")).strip()
     modifier_value = str((modifier or {}).get("value", "")).strip() or "—"
     symbol = TYPE_STYLES.get(modifier_type, TYPE_STYLES["Colorless"])["symbol"] if modifier_type else "—"
     value_text = f"{symbol} {modifier_value}" if modifier_type else "—"
-    width_cls = "min-w-24" if compact else "min-w-28"
-    padding_cls = "px-2.5 py-1.5" if compact else "px-3 py-2"
+    shell_cls = (
+        "min-w-24 rounded-2xl border border-stone-200 bg-white/90 px-3 py-2 shadow-sm"
+        if compact else
+        "min-w-28 rounded-2xl border border-stone-200 bg-white/95 px-3 py-2 shadow-sm"
+    )
 
-    with Column(gap=0, css_class=f"{width_cls} rounded-xl border border-slate-200/80 bg-white/80 {padding_cls} shadow-sm"):
-        Text(label, css_class="text-xs font-semibold uppercase tracking-widest text-slate-500")
+    with Column(gap=0, css_class=shell_cls):
+        Text(label, css_class="text-[10px] font-semibold uppercase tracking-[0.18em] text-stone-500")
         Text(value_text, css_class="text-sm font-semibold text-slate-900")
         if not compact:
-            Muted(modifier_type or "Not listed", css_class="text-xs")
+            Muted(modifier_type or "Not listed", css_class="text-[11px] text-stone-500")
+
+
+def _render_card_banner(
+    name: str,
+    subtitle: str,
+    *,
+    types: list[str],
+    hp: str | int,
+    rarity_label: str,
+    bg: str,
+    border_cls: str,
+    compact: bool = False,
+) -> None:
+    style = _type_style(types)
+    is_dark = _is_dark_type(types)
+    type_symbols = _energy_symbols(types) or style["symbol"]
+    title_cls = "text-white drop-shadow-sm" if is_dark else "text-slate-950"
+    subtitle_cls = "text-white/80" if is_dark else "text-slate-700"
+    ribbon_cls = (
+        "rounded-full border border-white/15 bg-black/10 px-3 py-1.5 shadow-sm"
+        if is_dark else
+        "rounded-full border border-white/80 bg-white/80 px-3 py-1.5 shadow-sm"
+    )
+    rarity_cls = (
+        "rounded-full border border-white/15 bg-black/10 px-3 py-1.5 text-[11px] font-semibold text-white/90 shadow-sm"
+        if is_dark else
+        "rounded-full border border-white/80 bg-white/80 px-3 py-1.5 text-[11px] font-semibold text-slate-700 shadow-sm"
+    )
+    metric_cls = (
+        "rounded-2xl border border-white/15 bg-black/10 px-3 py-2 shadow-sm"
+        if is_dark else
+        "rounded-2xl border border-white/80 bg-white/85 px-3 py-2 shadow-sm"
+    )
+    type_label = (types or ["Colorless"])[0] if compact else " / ".join((types or ["Colorless"])[:2])
+
+    with CardHeader(css_class=f"{bg} border-b {border_cls} px-4 {'pt-4 pb-3' if compact else 'pt-5 pb-4'}"):
+        with Column(gap=3):
+            with Row(justify="between", align="center", css_class="gap-3"):
+                with Row(gap=2, align="center", css_class=ribbon_cls):
+                    Text(type_symbols, css_class="text-sm")
+                    Text(type_label, css_class=f"text-[11px] font-semibold uppercase tracking-[0.18em] {subtitle_cls}")
+                if rarity_label:
+                    Text(rarity_label, css_class=rarity_cls)
+
+            with Row(justify="between", align="start", css_class="gap-3"):
+                with Column(gap=1):
+                    CardTitle(name, css_class=f"{'text-lg' if compact else 'text-2xl'} font-bold tracking-tight leading-none {title_cls}")
+                    if subtitle:
+                        CardDescription(
+                            subtitle,
+                            css_class=f"{'text-[13px]' if compact else 'text-sm'} font-medium {subtitle_cls}",
+                        )
+                with Column(gap=0, align="end", css_class=metric_cls):
+                    Text(f"{hp} HP", css_class=f"{'text-base' if compact else 'text-xl'} font-black leading-none {title_cls}")
+                    Text("Hit points", css_class=f"text-[10px] font-semibold uppercase tracking-[0.18em] {subtitle_cls}")
+
+
+def _render_art_stage(
+    img_url: str,
+    *,
+    name: str,
+    bg: str,
+    symbol: str,
+    compact: bool = False,
+) -> None:
+    with Column(gap=0, css_class="rounded-3xl border border-amber-100 bg-gradient-to-b from-stone-200/80 via-stone-100 to-white p-3 shadow-inner"):
+        if img_url:
+            Image(
+                src=img_url,
+                alt=f"{name} Pokemon card",
+                width="100%",
+                height="240px" if compact else "auto",
+                css_class=f"w-full rounded-2xl bg-white object-contain {'p-2' if compact else 'p-3'}",
+            )
+        else:
+            with Column(
+                align="center",
+                justify="center",
+                css_class=f"{bg} {'min-h-60' if compact else 'min-h-40'} rounded-2xl border border-white/50",
+            ):
+                Text(symbol, css_class="text-5xl opacity-30")
+
+
+def _render_attack_stage(attacks: list[dict], *, compact: bool = False) -> None:
+    visible_attacks = _attack_slots(attacks, limit=2) if compact else list(attacks)
+
+    with Column(gap=3, css_class="rounded-3xl border border-amber-100 bg-white/85 px-4 py-4 shadow-sm"):
+        Text(
+            "Moves" if compact else "Attacks",
+            css_class="text-[10px] font-semibold uppercase tracking-[0.2em] text-stone-500",
+        )
+
+        if compact:
+            for attack in visible_attacks:
+                with Row(
+                    justify="between",
+                    align="center",
+                    css_class="min-h-11 rounded-2xl border border-stone-200 bg-stone-50/90 px-3 py-2 shadow-sm",
+                ):
+                    if attack:
+                        cost_str = _energy_symbols(attack.get("cost", []))
+                        with Row(gap=2, align="center"):
+                            if cost_str:
+                                Text(
+                                    cost_str,
+                                    css_class="rounded-full border border-stone-200 bg-white px-2.5 py-1 text-xs shadow-sm",
+                                )
+                            Text(attack.get("name", "Attack"), css_class="text-sm font-semibold text-slate-900")
+                        if attack.get("damage"):
+                            Text(
+                                attack["damage"],
+                                css_class="rounded-full border border-stone-200 bg-white px-2.5 py-1 text-xs font-bold text-slate-900 shadow-sm",
+                            )
+                    else:
+                        Muted("No second move listed", css_class="text-xs italic text-stone-500")
+        elif visible_attacks:
+            with Column(gap=2):
+                for atk in visible_attacks:
+                    cost_str = _energy_symbols(atk.get("cost", []))
+                    dmg = atk.get("damage", "")
+
+                    with Column(gap=2, css_class="rounded-2xl border border-stone-200 bg-stone-50/90 px-3 py-3 shadow-sm"):
+                        with Row(justify="between", align="center", css_class="gap-2"):
+                            with Row(gap=2, align="center"):
+                                if cost_str:
+                                    Text(
+                                        cost_str,
+                                        css_class="rounded-full border border-stone-200 bg-white px-2.5 py-1 text-xs shadow-sm",
+                                    )
+                                Text(atk["name"], css_class="text-sm font-semibold text-slate-900")
+                            if dmg:
+                                Text(
+                                    dmg,
+                                    css_class="rounded-full border border-stone-200 bg-white px-2.5 py-1 text-xs font-bold text-slate-900 shadow-sm",
+                                )
+                        if atk.get("text"):
+                            Muted(atk["text"], css_class="text-xs leading-relaxed text-slate-600")
+        else:
+            Muted("No attacks listed for this card.", css_class="text-xs italic text-stone-500")
 
 
 def _render_search_result_card(
@@ -611,81 +822,70 @@ def _render_search_result_card(
     number = card.get("number", "")
     img_url = _card_image_url(card)
     attacks = card.get("attacks") or []
-    attack_slots = _attack_slots(attacks, limit=2)
     weakness = card.get("weakness")
     resistance = card.get("resistance")
+    subtitle_text = f"{subtitle} · {set_name}" if subtitle and set_name else subtitle or set_name
 
-    with Card(css_class="h-full overflow-hidden border border-slate-200/90 bg-gradient-to-b from-white via-slate-50 to-slate-100 shadow-md hover:-translate-y-0.5 hover:shadow-xl transition-all duration-200"):
-        with CardHeader(css_class=f"{bg} border-b {style['border']} px-3 py-3"):
-            with Row(justify="between", align="start", css_class="gap-3"):
-                with Column(gap=2, css_class="flex-1 rounded-2xl border border-white/75 bg-white/82 px-3 py-2 shadow-sm"):
-                    with Row(gap=2, align="center"):
-                        with Row(gap=1, align="center", css_class="rounded-full border border-slate-200 bg-white px-2 py-1 shadow-sm"):
-                            Text(_energy_symbols(types) or symbol, css_class="text-sm")
-                        CardTitle(name, css_class="text-base font-black tracking-tight leading-none text-slate-950")
-                    if subtitle or set_name:
-                        CardDescription(
-                            f"{subtitle} · {set_name}" if subtitle and set_name else subtitle or set_name,
-                            css_class="text-sm font-medium text-slate-700",
-                        )
-                with Column(gap=1, align="end", css_class="min-w-20 rounded-2xl border border-white/80 bg-amber-50/90 px-3 py-2 shadow-sm"):
-                    Text("HP", css_class="text-xs font-semibold uppercase tracking-widest text-amber-700")
-                    Text(f"{hp}", css_class="text-lg font-black leading-none text-slate-950")
-                    Text(rarity, css_class="text-xs font-medium text-slate-700 text-right")
-
-        if img_url:
-            with CardContent():
-                Image(
-                    src=img_url,
-                    alt=f"{name} Pokemon card",
-                    width="100%",
-                    height="240px",
-                    css_class="w-full rounded-2xl bg-white/90 object-contain p-2 shadow-sm",
-                )
-        else:
-            with CardContent():
-                with Column(align="center", justify="center", css_class=f"{bg} min-h-60 rounded-2xl"):
-                    Text(symbol, css_class="text-5xl opacity-30")
+    with Card(css_class="h-full overflow-hidden rounded-3xl border border-amber-100/80 bg-gradient-to-b from-white via-amber-50/70 to-stone-100/80 shadow-lg ring-1 ring-black/5 hover:-translate-y-1 hover:shadow-2xl transition-all duration-200"):
+        _render_card_banner(
+            name,
+            subtitle_text,
+            types=types,
+            hp=hp,
+            rarity_label=rarity,
+            bg=bg,
+            border_cls=style["border"],
+            compact=True,
+        )
 
         with CardContent():
-            with Row(gap=2, css_class="flex-wrap"):
-                for type_name in types[:2]:
-                    Badge(type_name, variant="secondary", css_class="text-xs")
-                Badge(rarity, variant="info", css_class="text-xs")
+            with Column(gap=3):
+                _render_art_stage(img_url, name=name, bg=bg, symbol=symbol, compact=True)
+                _render_attack_stage(attacks, compact=True)
 
-            with Column(gap=2, css_class="mt-3 min-h-24"):
-                for attack in attack_slots:
-                    with Row(justify="between", align="center", css_class="min-h-10 rounded-xl border border-slate-200/80 bg-white/78 px-3 py-2 shadow-sm"):
-                        if attack:
-                            cost_str = _energy_symbols(attack.get("cost", []))
-                            with Row(gap=2, align="center"):
-                                if cost_str:
-                                    Text(cost_str, css_class="text-xs")
-                                Text(attack.get("name", "Attack"), css_class="text-sm font-semibold text-slate-900")
-                            if attack.get("damage"):
-                                Text(attack["damage"], css_class="text-sm font-bold text-slate-900")
-                        else:
-                            Muted("—", css_class="text-sm italic")
-
-        with CardFooter(css_class="border-t border-slate-200/80 bg-slate-50/85"):
+        with CardFooter(css_class="border-t border-stone-200 bg-stone-50/85"):
             with Column(gap=2, css_class="w-full"):
                 with Row(justify="between", align="start", css_class="gap-2"):
-                    with Row(gap=2, css_class="flex-wrap"):
-                        _render_modifier_panel("Weakness", weakness, compact=True)
-                        _render_modifier_panel("Resistance", resistance, compact=True)
-                    with Column(gap=0, align="end", css_class="rounded-xl border border-slate-200/80 bg-white/80 px-3 py-2 shadow-sm"):
-                        Text(set_name or "Set", css_class="text-xs font-semibold uppercase tracking-widest text-slate-500")
-                        Text(f"#{number}" if number else "—", css_class="text-sm font-semibold text-slate-900")
-
+                    with Column(gap=1):
+                        Muted(_modifier_summary("Weak", weakness), css_class="text-xs text-stone-600")
+                        Muted(_modifier_summary("Resist", resistance), css_class="text-xs text-stone-600")
+                    if set_name or number:
+                        Muted(
+                            f"{set_name} #{number}" if number else set_name,
+                            css_class="text-xs text-right text-stone-600",
+                        )
                 if saved_state_key:
-                    with Row(justify="between", align="center"):
+                    with Row(justify="between", align="center", css_class="gap-3"):
                         with If(saved_state_key):
                             Badge("Saved to collection", variant="secondary", css_class="text-xs")
                         with If(f"!{saved_state_key}"):
-                            Muted("Save this print", css_class="text-xs")
+                            Muted("Archive this print in your collection.", css_class="text-xs text-stone-600")
                         if save_action is not None:
                             with If(f"!{saved_state_key}"):
                                 Button("Save print", icon="save", variant="success", on_click=save_action)
+
+
+def _render_app_shell_header(
+    title: str,
+    description: str,
+    meta_items: list[str] | None = None,
+    *,
+    icon: str = "✦",
+) -> None:
+    with Row(justify="between", align="start", css_class="gap-4"):
+        with Column(gap=1):
+            with Row(gap=2, align="center"):
+                Text(icon, css_class="text-lg text-amber-300")
+                CardTitle(title, css_class="text-xl tracking-tight text-white")
+            CardDescription(description, css_class="text-sm text-slate-300")
+
+        if meta_items:
+            with Row(gap=2, css_class="flex-wrap justify-end"):
+                for item in meta_items:
+                    Text(
+                        item,
+                        css_class="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-medium text-slate-200",
+                    )
 
 
 def _render_card(
@@ -699,110 +899,81 @@ def _render_card(
     style    = _type_style(types)
     bg       = style["bg"]
     symbol   = style["symbol"]
-    type_symbols = _energy_symbols(types) or symbol
     name     = card.get("name", "Unknown")
     hp       = card.get("hp", "?")
     rarity   = card.get("rarity", "")
     rarity_sym = RARITY_SYMBOL.get(rarity, "")
     rarity_label = rarity_sym or rarity or ("Custom" if card.get("source") in CUSTOM_CARD_SOURCES else "")
+    subtitle = card.get("subtitle", "")
+    set_name = card.get("set", "")
+    number = card.get("number", "")
+    img_url = _card_image_url(card)
 
-    with Card(css_class="overflow-hidden border border-slate-200/90 bg-gradient-to-b from-white via-slate-50 to-slate-100 shadow-md hover:-translate-y-0.5 hover:shadow-xl transition-all duration-200"):
+    with Card(css_class="overflow-hidden rounded-3xl border border-amber-100/80 bg-gradient-to-b from-white via-amber-50/70 to-stone-100/80 shadow-lg ring-1 ring-black/5 hover:-translate-y-1 hover:shadow-2xl transition-all duration-200"):
+        _render_card_banner(
+            name,
+            subtitle,
+            types=types,
+            hp=hp,
+            rarity_label=rarity_label,
+            bg=bg,
+            border_cls=style["border"],
+        )
 
-        # — Coloured header band ———————————————————————————————————————————
-        with CardHeader(css_class=f"{bg} border-b {style['border']} px-4 py-4"):
-            with Row(justify="between", align="start", css_class="gap-3"):
-                with Column(gap=2, css_class="flex-1 rounded-3xl border border-white/75 bg-white/82 px-4 py-3 shadow-sm"):
-                    with Row(gap=2, align="center"):
-                        with Row(gap=1, align="center", css_class="rounded-full border border-slate-200 bg-white px-2 py-1 shadow-sm"):
-                            Text(type_symbols, css_class="text-sm")
-                        CardTitle(name, css_class="text-xl font-black tracking-tight leading-none text-slate-950")
-                    if card.get("subtitle"):
-                        CardDescription(
-                            card["subtitle"],
-                            css_class="text-sm font-medium text-slate-700",
-                        )
-                with Column(gap=1, align="end", css_class="min-w-24 rounded-2xl border border-white/80 bg-amber-50/90 px-3 py-2 shadow-sm"):
-                    Text("HP", css_class="text-xs font-semibold uppercase tracking-widest text-amber-700")
-                    Text(f"{hp}", css_class="text-2xl font-black leading-none text-slate-950")
-                    if rarity_label:
-                        Text(rarity_label, css_class="text-xs font-medium text-slate-700 text-right")
-
-        # — Card image ———————————————————————————————————————————————————
-        img_url = _card_image_url(card)
-        if img_url:
-            with CardContent():
-                Image(
-                    src=img_url,
-                    alt=f"{name} Pokemon card",
-                    width="100%",
-                    height="auto",
-                    css_class="w-full rounded-2xl bg-white/90 object-contain p-3 shadow-sm",
-                )
-        else:
-            with CardContent():
-                with Column(align="center", justify="center", css_class=f"{bg} min-h-32 rounded-2xl"):
-                    Text(symbol, css_class="text-5xl opacity-30")
-
-        # — Attacks ——————————————————————————————————————————————————————
         with CardContent():
-            attacks = card.get("attacks", [])
-            if attacks:
-                with Column(gap=2):
-                    for atk in attacks:
-                        cost_str = _energy_symbols(atk.get("cost", []))
-                        dmg = atk.get("damage", "")
-                        with Column(gap=1, css_class="rounded-2xl border border-slate-200/80 bg-white/78 px-3 py-2 shadow-sm"):
-                            with Row(justify="between", align="center"):
-                                with Row(gap=1, align="center"):
-                                    if cost_str:
-                                        Text(cost_str, css_class="text-sm")
-                                    Text(atk["name"], css_class="font-semibold text-sm text-slate-900")
-                                if dmg:
-                                    Text(dmg, css_class="font-bold text-sm text-slate-900")
-                            if atk.get("text"):
-                                Muted(atk["text"], css_class="text-xs leading-tight")
-            else:
-                Muted("No attacks", css_class="text-xs italic")
+            with Column(gap=4):
+                _render_art_stage(img_url, name=name, bg=bg, symbol=symbol)
+                _render_attack_stage(card.get("attacks", []))
 
-        # — Footer ———————————————————————————————————————————————————————
-        with CardFooter(css_class="border-t border-slate-200/80 bg-slate-50/85"):
+        with CardFooter(css_class="border-t border-stone-200 bg-stone-50/85"):
             with Column(gap=2, css_class="w-full"):
                 with Row(justify="between", align="start", css_class="gap-3"):
-                    with Row(gap=2, css_class="flex-wrap"):
-                        _render_modifier_panel("Weakness", card.get("weakness"))
-                        _render_modifier_panel("Resistance", card.get("resistance"))
-                    set_name = card.get("set", "")
-                    number = card.get("number", "")
-                    with Column(gap=0, align="end", css_class="rounded-xl border border-slate-200/80 bg-white/80 px-3 py-2 shadow-sm"):
-                        Text(set_name or "Set", css_class="text-xs font-semibold uppercase tracking-widest text-slate-500")
-                        Text(f"#{number}" if number else "—", css_class="text-sm font-semibold text-slate-900")
-                if card.get("flavor"):
-                    Muted(card["flavor"], css_class="text-xs italic")
+                    with Column(gap=1):
+                        Muted(_modifier_summary("Weak", card.get("weakness")), css_class="text-xs text-stone-600")
+                        Muted(_modifier_summary("Resist", card.get("resistance")), css_class="text-xs text-stone-600")
+                    if set_name or number:
+                        Muted(
+                            f"{set_name} #{number}" if number else set_name,
+                            css_class="text-xs text-right text-stone-600",
+                        )
                 if card.get("source") in CUSTOM_CARD_SOURCES:
-                    Badge("✦ Custom", variant="secondary", css_class="text-xs")
+                    Muted("✦ Custom", css_class="text-xs text-stone-600")
+                if card.get("flavor"):
+                    Muted(card["flavor"], css_class="text-xs italic leading-relaxed text-stone-600")
                 if saved_state_key:
-                    with Row(justify="between", align="center"):
+                    with Row(justify="between", align="center", css_class="gap-3"):
                         with If(saved_state_key):
                             Badge("Saved to collection", variant="secondary", css_class="text-xs")
                         with If(f"!{saved_state_key}"):
-                            Muted("Not in collection yet.", css_class="text-xs")
+                            Muted("Archive this card in your collection.", css_class="text-xs text-stone-600")
                         if save_action is not None:
                             with If(f"!{saved_state_key}"):
                                 Button("Save to collection", icon="save", variant="success", on_click=save_action)
 
 
-@mcp.tool(app=True)
+@mcp.tool(
+    app=True,
+    description="Open the saved Pokelab collection dashboard from sandbox/collection.json. Use only for cards already saved in the collection; do not use this tool for live Pokemon TCG search or preview.",
+    annotations={
+        "title": "View Saved Collection",
+        "readOnlyHint": True,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
 def card_lab() -> PrefabApp:
     """Render my Pokémon card collection as a visual grid with card images."""
     cards = _load_collection()
+    count_label = f"{len(cards)} card{'s' if len(cards) != 1 else ''}"
 
     with PrefabApp() as app:
         with Column(gap=4, css_class="max-w-5xl mx-auto p-6"):
             with Card():
                 with CardHeader():
-                    CardTitle("✦ My Pokémon Collection", css_class="text-xl")
-                    CardDescription(
-                        f"{len(cards)} card{'s' if len(cards) != 1 else ''} · sandbox/collection.json"
+                    _render_app_shell_header(
+                        "My Pokemon Collection",
+                        f"{count_label} stored in sandbox/collection.json.",
+                        ["Collection lab", "Prefab UI"],
                     )
                 with CardContent():
                     if not cards:
@@ -817,8 +988,18 @@ def card_lab() -> PrefabApp:
     return app
 
 
-@mcp.tool(app=True)
-def preview_real_card(name: str) -> PrefabApp:
+@mcp.tool(
+    app=True,
+    description="Search the live Pokemon TCG API for cards matching a Pokemon name and open the visual results grid with inline save buttons. Use this for preview, search, browse, or inspect requests; do not use it to show the existing saved collection.",
+    annotations={
+        "title": "Search Live TCG Cards",
+        "readOnlyHint": True,
+        "openWorldHint": True,
+    },
+)
+def preview_real_card(
+    name: Annotated[str, "Pokemon name to search for in the live Pokemon TCG API, such as 'charizard' or 'pikachu'."]
+) -> PrefabApp:
     """Show a visual real-card search with inline save controls."""
     cards_or_error = _lookup_real_cards(name, page_size=6)
     cards: list[dict] = []
@@ -837,30 +1018,39 @@ def preview_real_card(name: str) -> PrefabApp:
 
     with PrefabApp(state=initial_state) as app:
         with Column(gap=4, css_class="max-w-6xl mx-auto p-6"):
-            with Column(gap=1):
-                Text("Pokemon TCG search", css_class="text-2xl font-bold")
-                if cards:
-                    Muted(
-                        f"Showing {len(cards)} live match{'es' if len(cards) != 1 else ''} for {name.strip()!r}. Save any print directly from this view."
-                    )
-                else:
-                    Muted("Fetched live from the Pokemon TCG API. Save any card only if you want to keep it.")
-
-            if error_message:
-                with Card(css_class="border border-red-200 shadow-sm"):
-                    with CardHeader():
-                        CardTitle("Could not fetch card", css_class="text-lg text-red-700")
-                    with CardContent():
-                        Muted(error_message, css_class="text-sm text-red-700")
-            else:
-                with Grid(columns=1, gap=4, css_class="sm:grid-cols-2 xl:grid-cols-3"):
-                    for card in cards:
-                        state_key = _saved_state_key(str(card.get("id", "")))
-                        _render_search_result_card(
-                            card,
-                            save_action=_save_fetched_card_action(card, state_key),
-                            saved_state_key=state_key,
+            with Card():
+                with CardHeader():
+                    if cards:
+                        _render_app_shell_header(
+                            "Pokemon TCG search",
+                            f"Showing {len(cards)} live match{'es' if len(cards) != 1 else ''} for {name.strip()!r}. Save any print directly from this view.",
+                            ["Live TCG API", "Inline save"],
+                            icon="◈",
                         )
+                    else:
+                        _render_app_shell_header(
+                            "Pokemon TCG search",
+                            "Fetched live from the Pokemon TCG API. Save any card only if you want to keep it.",
+                            ["Live TCG API", "Inline save"],
+                            icon="◈",
+                        )
+
+                with CardContent():
+                    if error_message:
+                        with Card(css_class="border border-red-200 shadow-sm"):
+                            with CardHeader():
+                                CardTitle("Could not fetch card", css_class="text-lg text-red-700")
+                            with CardContent():
+                                Muted(error_message, css_class="text-sm text-red-700")
+                    else:
+                        with Grid(columns=1, gap=4, css_class="sm:grid-cols-2 xl:grid-cols-3"):
+                            for card in cards:
+                                state_key = _saved_state_key(str(card.get("id", "")))
+                                _render_search_result_card(
+                                    card,
+                                    save_action=_save_fetched_card_action(card, state_key),
+                                    saved_state_key=state_key,
+                                )
 
     return app
 
@@ -1085,38 +1275,63 @@ def _save_card_action() -> CallTool:
 
 
 def _render_live_card_preview() -> None:
-    with Card(css_class="overflow-hidden border border-slate-200/90 bg-gradient-to-b from-white via-slate-50 to-slate-100 shadow-lg"):
-        with CardHeader(css_class="bg-gradient-to-r from-amber-200 via-orange-100 to-yellow-50 border-b border-amber-300"):
-            with Row(justify="between", align="start", css_class="gap-3"):
-                with Column(gap=2, css_class="flex-1 rounded-3xl border border-white/80 bg-white/85 px-4 py-3 shadow-sm"):
-                    with Row(gap=2, align="center"):
-                        Badge("{{ primary_type }}", variant="secondary")
-                        CardTitle("{{ name }}", css_class="text-base font-black tracking-tight")
-                    CardDescription("{{ stage }} · {{ primary_type }} / {{ secondary_type }}", css_class="text-sm font-medium text-slate-700")
-                with Column(gap=1, align="end", css_class="rounded-2xl border border-white/80 bg-amber-50/90 px-3 py-2 shadow-sm"):
-                    Text("HP", css_class="text-xs font-semibold uppercase tracking-widest text-amber-700")
-                    Text("{{ hp }}", css_class="text-xl font-black text-slate-900")
-        with CardContent():
+    with Card(css_class="overflow-hidden rounded-3xl border border-amber-100/80 bg-gradient-to-b from-white via-amber-50/70 to-stone-100/80 shadow-lg ring-1 ring-black/5"):
+        with CardHeader(css_class="bg-gradient-to-r from-amber-200 via-orange-100 to-yellow-50 border-b border-amber-300 px-4 pt-5 pb-4"):
             with Column(gap=3):
-                with Row(gap=2):
-                    Badge("{{ rarity }}", variant="info")
-                    Badge("{{ holo ? 'Holo' : 'Matte' }}", variant="success")
-                Progress(value="{{ hp }}", max=220, target=120, variant="warning", gradient=True)
-                Separator()
-                with Column(gap=2):
-                    with Row(justify="between", align="center"):
-                        Text("{{ attack_1_cost }} {{ attack_1_name }}", css_class="font-semibold text-sm")
-                        Text("{{ attack_1_damage }}", css_class="font-bold text-sm")
-                    Muted("{{ attack_1_text }}", css_class="text-xs leading-tight")
-                    with Row(justify="between", align="center"):
-                        Text("{{ attack_2_cost }} {{ attack_2_name }}", css_class="font-semibold text-sm")
-                        Text("{{ attack_2_damage }}", css_class="font-bold text-sm")
-                    Muted("{{ attack_2_text }}", css_class="text-xs leading-tight")
-                Separator()
-                with Row(gap=2, css_class="flex-wrap"):
-                    Badge("Weak {{ weakness_type }} {{ weakness_value }}", variant="warning")
-                    Badge("{{ resistance_type ? 'Resistance ' + resistance_type + ' ' + resistance_value : 'Resistance —' }}", variant="secondary")
-                Muted("{{ flavor }}", css_class="text-xs italic")
+                with Row(justify="between", align="center", css_class="gap-3"):
+                    with Row(gap=2, align="center", css_class="rounded-full border border-white/80 bg-white/80 px-3 py-1.5 shadow-sm"):
+                        Text("{{ primary_type }}", css_class="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-700")
+                    Text("{{ rarity }}", css_class="rounded-full border border-white/80 bg-white/80 px-3 py-1.5 text-[11px] font-semibold text-slate-700 shadow-sm")
+                with Row(justify="between", align="start", css_class="gap-3"):
+                    with Column(gap=1):
+                        CardTitle("{{ name }}", css_class="text-2xl font-bold tracking-tight text-slate-950")
+                        CardDescription(
+                            "{{ secondary_type ? stage + ' · ' + primary_type + ' / ' + secondary_type : stage + ' · ' + primary_type }}",
+                            css_class="text-sm font-medium text-slate-700",
+                        )
+                    with Column(gap=0, align="end", css_class="rounded-2xl border border-white/80 bg-white/85 px-3 py-2 shadow-sm"):
+                        Text("{{ hp }} HP", css_class="text-xl font-black text-slate-900")
+                        Text("Hit points", css_class="text-[10px] font-semibold uppercase tracking-[0.18em] text-stone-600")
+        with CardContent():
+            with Column(gap=4):
+                with Column(gap=1, css_class="rounded-3xl border border-amber-100 bg-gradient-to-b from-stone-200/80 via-stone-100 to-white px-4 py-5 shadow-inner"):
+                    Text("Card concept", css_class="text-[10px] font-semibold uppercase tracking-[0.2em] text-stone-500")
+                    Muted("{{ notes }}", css_class="text-xs leading-relaxed text-slate-600")
+                with Row(justify="between", align="center", css_class="flex-wrap gap-2 rounded-full border border-stone-200 bg-stone-100/80 px-3 py-2"):
+                    with Row(gap=2, css_class="flex-wrap"):
+                        Text("{{ primary_type }}", css_class="rounded-full border border-white bg-white/90 px-2.5 py-1 text-[11px] font-semibold text-slate-700 shadow-sm")
+                        Text("{{ holo ? 'Holo' : 'Matte' }}", css_class="rounded-full border border-white bg-white/90 px-2.5 py-1 text-[11px] font-semibold text-slate-700 shadow-sm")
+                    Text("{{ first_edition ? '1st Edition' : 'Standard print' }}", css_class="text-[11px] font-semibold uppercase tracking-[0.16em] text-stone-600")
+                with Column(gap=3, css_class="rounded-3xl border border-amber-100 bg-white/85 px-4 py-4 shadow-sm"):
+                    Text("Attacks", css_class="text-[10px] font-semibold uppercase tracking-[0.2em] text-stone-500")
+                    with Column(gap=2, css_class="rounded-2xl border border-stone-200 bg-stone-50/90 px-3 py-3 shadow-sm"):
+                        with Row(justify="between", align="center", css_class="gap-2"):
+                            with Row(gap=2, align="center"):
+                                Text("{{ attack_1_cost }}", css_class="rounded-full border border-stone-200 bg-white px-2.5 py-1 text-xs shadow-sm")
+                                Text("{{ attack_1_name }}", css_class="text-sm font-semibold text-slate-900")
+                            Text("{{ attack_1_damage }}", css_class="rounded-full border border-stone-200 bg-white px-2.5 py-1 text-xs font-bold text-slate-900 shadow-sm")
+                        Muted("{{ attack_1_text }}", css_class="text-xs leading-relaxed text-slate-600")
+                    with Column(gap=2, css_class="rounded-2xl border border-stone-200 bg-stone-50/90 px-3 py-3 shadow-sm"):
+                        with Row(justify="between", align="center", css_class="gap-2"):
+                            with Row(gap=2, align="center"):
+                                Text("{{ attack_2_cost }}", css_class="rounded-full border border-stone-200 bg-white px-2.5 py-1 text-xs shadow-sm")
+                                Text("{{ attack_2_name }}", css_class="text-sm font-semibold text-slate-900")
+                            Text("{{ attack_2_damage }}", css_class="rounded-full border border-stone-200 bg-white px-2.5 py-1 text-xs font-bold text-slate-900 shadow-sm")
+                        Muted("{{ attack_2_text }}", css_class="text-xs leading-relaxed text-slate-600")
+        with CardFooter(css_class="border-t border-stone-200 bg-stone-50/85"):
+            with Column(gap=2, css_class="w-full"):
+                with Row(justify="between", align="start", css_class="gap-3"):
+                    with Column(gap=1):
+                        Muted(
+                            "{{ weakness_type ? 'Weak: ' + weakness_type + ' ' + weakness_value : 'Weak: —' }}",
+                            css_class="text-xs text-stone-600",
+                        )
+                        Muted(
+                            "{{ resistance_type ? 'Resist: ' + resistance_type + ' ' + resistance_value : 'Resist: —' }}",
+                            css_class="text-xs text-stone-600",
+                        )
+                    Muted("{{ illustrator }}", css_class="text-xs text-right text-stone-600")
+                Muted("{{ flavor }}", css_class="text-xs italic leading-relaxed text-stone-600")
 
 
 @mcp.tool(app=True)

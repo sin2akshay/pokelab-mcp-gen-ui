@@ -173,6 +173,8 @@ Run **MCP: Add Server** from the Command Palette, choose a local stdio server, u
 
 After adding it, run **MCP: List Servers**, start `pokelab`, trust the server when prompted, then open Copilot Chat and use Agent mode. The tools, prompt, resources, and MCP Apps can be enabled or disabled from the chat tool picker.
 
+If you change `server.py` and chat still renders an older PokéLab UI, restart `pokelab` from **MCP: List Servers** first. If the stale UI persists, stop any lingering `python .../pokelab/server.py` processes and remove `pokelab/__pycache__` before starting the server again so VS Code reloads the current source instead of an older runtime state.
+
 ---
 
 ## Using it in chat
