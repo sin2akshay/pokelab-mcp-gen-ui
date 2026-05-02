@@ -11,7 +11,7 @@ Stitches together every Session 4 pattern:
 
 Tools exposed:
   fetch_real_card(name)       — internet:    Pokemon TCG API (includes card image)
-    preview_real_card(name)     — Prefab UI:   previews one fetched card with optional save
+    preview_real_card(name)     — Prefab UI:   visual real-card search with inline save
   manage_collection(action,…) — file CRUD:   sandbox/collection.json
   refresh_collection_images() — internet:    backfills image URLs for old saved cards
   card_lab()                  — Prefab UI:   renders collection as a styled grid
@@ -47,7 +47,7 @@ DEFAULT_HEADERS = {
 
 from dotenv import load_dotenv
 from fastmcp import FastMCP
-from prefab_ui.actions import ShowToast
+from prefab_ui.actions import SetState, ShowToast
 from prefab_ui.actions.mcp import CallTool
 from prefab_ui.app import PrefabApp
 from prefab_ui.components import (
@@ -87,6 +87,7 @@ from prefab_ui.components import (
     Text,
     Textarea,
 )
+from prefab_ui.components.control_flow import If
 
 load_dotenv()
 # ---------------------------------------------------------------------------
@@ -256,9 +257,9 @@ def _card_image_url(card: dict) -> str:
 # ===========================================================================
 # 1. INTERNET TOOL — Pokemon TCG API
 # ===========================================================================
-# Returns a normalized dict — only the fields we render.
+# Returns normalized card dicts — only the fields we render.
 # Trimming the response keeps tokens down when the model passes the result
-# back to itself.
+# back to itself or when a visual search renders multiple matches.
 # ---------------------------------------------------------------------------
 
 POKE_TCG_BASE = "https://api.pokemontcg.io/v2/cards"
@@ -305,6 +306,78 @@ def _fetch_image_data_uri(url: str, *, timeout: float = 10) -> str:
         return url
 
 
+def _pokemon_tcg_headers() -> dict[str, str]:
+    headers = {}
+    if api_key := os.getenv("POKEMON_TCG_API_KEY"):
+        headers["X-Api-Key"] = api_key
+    return headers
+
+
+def _normalize_real_card(card: dict, default_name: str) -> dict:
+    remote_image = card.get("images", {}).get("small", "")
+    return {
+        "id": card.get("id", ""),
+        "name": card.get("name", default_name),
+        "hp": card.get("hp", "?"),
+        "types": card.get("types", []) or [],
+        "subtitle": (card.get("subtypes") or ["Basic"])[0],
+        "attacks": [
+            {
+                "name": attack.get("name", ""),
+                "cost": attack.get("cost", []) or [],
+                "damage": attack.get("damage", ""),
+                "text": attack.get("text", ""),
+            }
+            for attack in (card.get("attacks") or [])
+        ],
+        "weakness": (
+            {
+                "type": card["weaknesses"][0].get("type", ""),
+                "value": card["weaknesses"][0].get("value", ""),
+            }
+            if card.get("weaknesses") else None
+        ),
+        "set": (card.get("set") or {}).get("name", ""),
+        "number": card.get("number", ""),
+        "rarity": card.get("rarity", ""),
+        "image_url": _fetch_image_data_uri(remote_image),
+        "image_remote_url": remote_image,
+        "source": "pokemon_tcg_api",
+    }
+
+
+def _lookup_real_cards(name: str, *, page_size: int = 1) -> list[dict] | dict:
+    query = name.strip()
+    if not query:
+        return {"error": "Pokemon name is required."}
+
+    try:
+        _, payload = _json_get(
+            POKE_TCG_BASE,
+            params={"q": f"name:{query}", "pageSize": page_size, "orderBy": "set.releaseDate"},
+            headers=_pokemon_tcg_headers(),
+            timeout=10,
+        )
+    except HTTPError as e:
+        return {"error": f"Pokemon TCG API returned HTTP {e.code} for {query!r}: {e.reason}"}
+    except (URLError, TimeoutError) as e:
+        return {"error": f"Network error fetching {query!r}: {e}"}
+    except json.JSONDecodeError as e:
+        return {"error": f"Invalid JSON from Pokemon TCG API for {query!r}: {e}"}
+    except Exception as e:  # pragma: no cover - defensive
+        return {"error": f"Unexpected error fetching {query!r}: {e}"}
+
+    if not isinstance(payload, dict):
+        return {"error": f"Unexpected response shape for {query!r}"}
+
+    cards = payload.get("data", []) or []
+    if not cards:
+        return {"error": f"No card found for {query!r}"}
+
+    default_name = query.title()
+    return [_normalize_real_card(card, default_name) for card in cards]
+
+
 @mcp.tool()
 def fetch_real_card(name: str) -> dict:
     """Fetch a real Pokemon card by name from the Pokemon TCG API.
@@ -316,57 +389,10 @@ def fetch_real_card(name: str) -> dict:
         A dict describing the card (id, name, hp, types, attacks, etc.)
         or {"error": "..."} if the lookup failed.
     """
-    headers = {}
-    if api_key := os.getenv("POKEMON_TCG_API_KEY"):
-        headers["X-Api-Key"] = api_key
-    try:
-        _, payload = _json_get(
-            POKE_TCG_BASE,
-            params={"q": f"name:{name}", "pageSize": 1, "orderBy": "set.releaseDate"},
-            headers=headers,
-            timeout=10,
-        )
-    except HTTPError as e:
-        return {"error": f"Pokemon TCG API returned HTTP {e.code} for {name!r}: {e.reason}"}
-    except (URLError, TimeoutError) as e:
-        return {"error": f"Network error fetching {name!r}: {e}"}
-    except json.JSONDecodeError as e:
-        return {"error": f"Invalid JSON from Pokemon TCG API for {name!r}: {e}"}
-    except Exception as e:  # pragma: no cover - defensive
-        return {"error": f"Unexpected error fetching {name!r}: {e}"}
-
-    if not isinstance(payload, dict):
-        return {"error": f"Unexpected response shape for {name!r}"}
-
-    cards = payload.get("data", []) or []
-    if not cards:
-        return {"error": f"No card found for {name!r}"}
-
-    c = cards[0]
-    remote_image = c.get("images", {}).get("small", "")
-    return {
-        "id": c.get("id", ""),
-        "name": c.get("name", name.title()),
-        "hp": c.get("hp", "?"),
-        "types": c.get("types", []) or [],
-        "subtitle": (c.get("subtypes") or ["Basic"])[0],
-        "attacks": [
-            {"name": a.get("name", ""), "cost": a.get("cost", []) or [],
-             "damage": a.get("damage", ""), "text": a.get("text", "")}
-            for a in (c.get("attacks") or [])
-        ],
-        "weakness": (
-            {"type": c["weaknesses"][0].get("type", ""),
-             "value": c["weaknesses"][0].get("value", "")}
-            if c.get("weaknesses") else None
-        ),
-        "set": (c.get("set") or {}).get("name", ""),
-        "number": c.get("number", ""),
-        "rarity": c.get("rarity", ""),
-        "image_url": _fetch_image_data_uri(remote_image),
-        "image_remote_url": remote_image,
-        "source": "pokemon_tcg_api",
-    }
+    cards = _lookup_real_cards(name, page_size=1)
+    if isinstance(cards, dict):
+        return cards
+    return cards[0]
 
 
 # ===========================================================================
@@ -400,6 +426,15 @@ def _collection_has_card(card_id: str, cards: list[dict] | None = None) -> bool:
         return False
     existing_cards = cards if cards is not None else _load_collection()
     return any(str(card.get("id", "")) == card_id for card in existing_cards)
+
+
+def _saved_state_key(card_id: str) -> str:
+    normalized = "".join(char if char.isalnum() else "_" for char in card_id.strip())
+    if not normalized:
+        normalized = "card"
+    if normalized[0].isdigit():
+        normalized = f"card_{normalized}"
+    return f"saved_{normalized}"
 
 
 @mcp.tool()
@@ -510,25 +545,119 @@ def refresh_collection_images() -> str:
 # 3. PREFAB UI — redesigned card renderer + card_lab grid
 # ===========================================================================
 
-def _save_fetched_card_action(card: dict) -> CallTool:
+def _save_fetched_card_action(card: dict, saved_state_key: str | None = None) -> CallTool:
     card_name = str(card.get("name", "Card")).strip() or "Card"
+    on_success = [ShowToast(
+        "Card saved",
+        description=f"{card_name} is now in sandbox/collection.json.",
+        variant="success",
+    )]
+    if saved_state_key:
+        on_success.insert(0, SetState(saved_state_key, True))
     return CallTool(
         "manage_collection",
         arguments={"action": "add", "card": card},
-        on_success=ShowToast(
-            "Card saved",
-            description=f"{card_name} is now in sandbox/collection.json.",
-            variant="success",
-        ),
+        on_success=on_success,
         on_error=ShowToast("Save failed", description="{{ $error }}", variant="error"),
     )
+
+
+def _render_search_result_card(
+    card: dict,
+    *,
+    save_action: CallTool | None = None,
+    saved_state_key: str | None = None,
+) -> None:
+    """Render a compact card tile for the live TCG search grid."""
+    types = card.get("types") or ["Colorless"]
+    style = _type_style(types)
+    symbol = style["symbol"]
+    bg = style["bg"]
+    name = card.get("name", "Unknown")
+    hp = card.get("hp", "?")
+    rarity = card.get("rarity", "") or "Unknown"
+    subtitle = card.get("subtitle", "")
+    set_name = card.get("set", "")
+    number = card.get("number", "")
+    img_url = _card_image_url(card)
+    attacks = card.get("attacks") or []
+    preview_attack = attacks[0] if attacks else None
+    preview_text = str((preview_attack or {}).get("text", "")).strip()
+    if len(preview_text) > 84:
+        preview_text = f"{preview_text[:81].rstrip()}..."
+
+    with Card(css_class="h-full overflow-hidden shadow-md hover:shadow-xl transition-shadow duration-200"):
+        with CardHeader(css_class=f"{bg} border-b {style['border']}"):
+            with Row(justify="between", align="start"):
+                with Column(gap=1):
+                    CardTitle(name, css_class="text-base font-semibold tracking-tight leading-none")
+                    if subtitle or set_name:
+                        CardDescription(
+                            f"{subtitle} · {set_name}" if subtitle and set_name else subtitle or set_name,
+                            css_class="text-sm font-medium",
+                        )
+                with Column(gap=1, align="end"):
+                    Badge(_energy_symbols(types) or symbol, variant="secondary")
+                    Text(f"{hp} HP", css_class="text-sm font-black leading-none")
+
+        if img_url:
+            with CardContent():
+                Image(
+                    src=img_url,
+                    alt=f"{name} Pokemon card",
+                    width="100%",
+                    height="auto",
+                    css_class="w-full rounded-xl bg-white object-contain p-2",
+                )
+        else:
+            with CardContent():
+                with Column(align="center", justify="center", css_class=f"{bg} min-h-40 rounded-xl"):
+                    Text(symbol, css_class="text-5xl opacity-30")
+
+        with CardContent():
+            with Row(gap=2):
+                for type_name in types[:2]:
+                    Badge(type_name, variant="secondary", css_class="text-xs")
+                Badge(rarity, variant="info", css_class="text-xs")
+
+            with Column(gap=1, css_class="mt-3"):
+                if preview_attack:
+                    with Row(justify="between", align="center"):
+                        Text(preview_attack.get("name", "Attack"), css_class="font-semibold text-sm")
+                        if preview_attack.get("damage"):
+                            Text(preview_attack["damage"], css_class="font-bold text-sm")
+                    if preview_text:
+                        Muted(preview_text, css_class="text-xs leading-tight")
+                else:
+                    Muted("No attacks", css_class="text-xs italic")
+
+            Separator(css_class="my-3")
+            with Row(justify="between", align="center"):
+                weakness = card.get("weakness")
+                if weakness:
+                    weak_symbol = TYPE_STYLES.get(weakness.get("type", ""), TYPE_STYLES["Colorless"])["symbol"]
+                    Muted(f"Weak {weak_symbol} {weakness.get('value', '')}", css_class="text-xs")
+                else:
+                    Muted("Weakness not listed", css_class="text-xs")
+                if number:
+                    Muted(f"#{number}", css_class="text-xs text-right")
+
+            if saved_state_key:
+                with Row(justify="between", align="center", css_class="mt-3"):
+                    with If(saved_state_key):
+                        Badge("Saved to collection", variant="secondary", css_class="text-xs")
+                    with If(f"!{saved_state_key}"):
+                        Muted("Save this print", css_class="text-xs")
+                    if save_action is not None:
+                        with If(f"!{saved_state_key}"):
+                            Button("Save print", icon="save", variant="success", on_click=save_action)
 
 
 def _render_card(
     card: dict,
     *,
     save_action: CallTool | None = None,
-    already_saved: bool = False,
+    saved_state_key: str | None = None,
 ) -> None:
     """Render one Pokemon card with type colours, image, attacks, and footer."""
     types    = card.get("types") or ["Colorless"]
@@ -631,14 +760,15 @@ def _render_card(
                 Muted(card["flavor"], css_class="text-xs italic mt-2 block")
             if card.get("source") in CUSTOM_CARD_SOURCES:
                 Badge("✦ Custom", variant="secondary", css_class="text-xs mt-1")
-            if save_action is not None or already_saved:
+            if saved_state_key:
                 with Row(justify="between", align="center", css_class="mt-3"):
-                    if already_saved:
+                    with If(saved_state_key):
                         Badge("Saved to collection", variant="secondary", css_class="text-xs")
-                    else:
+                    with If(f"!{saved_state_key}"):
                         Muted("Not in collection yet.", css_class="text-xs")
                     if save_action is not None:
-                        Button("Save to collection", icon="save", variant="success", on_click=save_action)
+                        with If(f"!{saved_state_key}"):
+                            Button("Save to collection", icon="save", variant="success", on_click=save_action)
 
 
 @mcp.tool(app=True)
@@ -669,32 +799,48 @@ def card_lab() -> PrefabApp:
 
 @mcp.tool(app=True)
 def preview_real_card(name: str) -> PrefabApp:
-    """Fetch a real Pokemon card and preview it with an optional save action."""
-    card = fetch_real_card(name)
-    already_saved = False
+    """Show a visual real-card search with inline save controls."""
+    cards_or_error = _lookup_real_cards(name, page_size=6)
+    cards: list[dict] = []
+    error_message = ""
+    initial_state: dict[str, bool] = {}
 
-    if "error" not in card:
-        cards = _load_collection()
-        already_saved = _collection_has_card(str(card.get("id", "")), cards)
+    if isinstance(cards_or_error, dict):
+        error_message = cards_or_error["error"]
+    else:
+        cards = cards_or_error
+        collection = _load_collection()
+        initial_state = {
+            _saved_state_key(str(card.get("id", ""))): _collection_has_card(str(card.get("id", "")), collection)
+            for card in cards
+        }
 
-    with PrefabApp() as app:
-        with Column(gap=4, css_class="max-w-3xl mx-auto p-6"):
+    with PrefabApp(state=initial_state) as app:
+        with Column(gap=4, css_class="max-w-6xl mx-auto p-6"):
             with Column(gap=1):
-                Text("Pokemon TCG preview", css_class="text-2xl font-bold")
-                Muted("Fetched live from the Pokemon TCG API. Save it only if you want to keep it.")
+                Text("Pokemon TCG search", css_class="text-2xl font-bold")
+                if cards:
+                    Muted(
+                        f"Showing {len(cards)} live match{'es' if len(cards) != 1 else ''} for {name.strip()!r}. Save any print directly from this view."
+                    )
+                else:
+                    Muted("Fetched live from the Pokemon TCG API. Save any card only if you want to keep it.")
 
-            if "error" in card:
+            if error_message:
                 with Card(css_class="border border-red-200 shadow-sm"):
                     with CardHeader():
                         CardTitle("Could not fetch card", css_class="text-lg text-red-700")
                     with CardContent():
-                        Muted(card["error"], css_class="text-sm text-red-700")
+                        Muted(error_message, css_class="text-sm text-red-700")
             else:
-                _render_card(
-                    card,
-                    save_action=None if already_saved else _save_fetched_card_action(card),
-                    already_saved=already_saved,
-                )
+                with Grid(columns=1, gap=4, css_class="sm:grid-cols-2 xl:grid-cols-3"):
+                    for card in cards:
+                        state_key = _saved_state_key(str(card.get("id", "")))
+                        _render_search_result_card(
+                            card,
+                            save_action=_save_fetched_card_action(card, state_key),
+                            saved_state_key=state_key,
+                        )
 
     return app
 
@@ -1112,10 +1258,10 @@ def design_card_walkthrough() -> str:
     """Walk a new user through the PokéLab demo end-to-end."""
     return (
         "I want to try the PokéLab MCP server. Please:\n"
-        "1. Fetch a Pikachu and a Charizard from the Pokemon TCG API.\n"
-        "2. Save both to my collection.\n"
-        "3. Call refresh_collection_images so all cards have their artwork.\n"
-        "4. Show me my collection in a Prefab dashboard.\n"
+        "1. Prefer the visual PokéLab app tools over raw JSON tools whenever possible.\n"
+        "2. Open a visual real-card search for Pikachu so I can inspect and save a print inline.\n"
+        "3. Then open a visual real-card search for Charizard.\n"
+        "4. Show me my saved collection in the Prefab card lab.\n"
         "5. Then open design_card so I can create a custom card in the Prefab UI.\n"
     )
 

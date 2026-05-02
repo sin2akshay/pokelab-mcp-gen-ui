@@ -1,6 +1,6 @@
 # PokéLab
 
-An MCP server that fetches, saves, designs, and renders Pokemon cards inside Claude Desktop or VS Code Copilot Chat.
+An MCP server that fetches, previews, saves, designs, and renders Pokemon cards inside Claude Desktop or VS Code Copilot Chat.
 
 Built for EAGv3 Session 4 and expanded as a Prefab UI showcase.
 
@@ -8,18 +8,19 @@ Built for EAGv3 Session 4 and expanded as a Prefab UI showcase.
 
 ## What it does
 
-Six tools, exposed over the Model Context Protocol:
+Seven tools, exposed over the Model Context Protocol:
 
 | Tool | What it does |
 |---|---|
-| `fetch_real_card(name)` | Looks up a real Pokemon card by name from the [Pokemon TCG API](https://docs.pokemontcg.io/) |
+| `fetch_real_card(name)` | Looks up one real Pokemon card by name from the [Pokemon TCG API](https://docs.pokemontcg.io/); useful for raw agent-side automation |
+| `preview_real_card(name)` | Opens a visual real-card search in Prefab, renders matching prints in a compact grid, and lets you save a card inline |
 | `manage_collection(action, …)` | CRUD over a personal card collection persisted to JSON |
 | `refresh_collection_images()` | Backfills artwork URLs for saved cards that are missing them |
 | `card_lab()` | Renders the saved collection as an interactive Prefab UI inside the chat |
 | `design_card()` | Opens an interactive Prefab card studio with tabs, controls, metrics, a table, and a live preview |
 | `save_custom_card(...)` | Saves the card submitted from the Prefab designer UI |
 
-A slash command (`/design_card_walkthrough`) is also exposed, which kicks off a full demo end-to-end.
+A slash command (`/design_card_walkthrough`) is also exposed, which kicks off a visual-first demo end-to-end.
 
 ---
 
@@ -27,9 +28,9 @@ A slash command (`/design_card_walkthrough`) is also exposed, which kicks off a 
 
 In Claude Desktop with the server connected, type:
 
-> *"Fetch a Pikachu and a Charizard, save them to my collection, then show me my collection in a Prefab dashboard. Then open the custom card designer."*
+> *"Open a visual PokéLab search for Pikachu so I can inspect real cards inline and save one from the UI. Then do the same for Charizard. After that, show me my collection in the card lab and open the custom card designer."*
 
-Claude or Copilot will fan out across the tools. A live, interactive Prefab dashboard renders inline in the chat when the host supports MCP Apps.
+When each preview opens, use the inline **Save to collection** button on the print you want. The saved state flips in place, and `card_lab()` then renders the persisted collection inline when the host supports MCP Apps.
 
 ---
 
@@ -64,7 +65,7 @@ cd pokelab
 fastmcp dev inspector server.py
 ```
 
-This opens the current FastMCP browser inspector. Click each tool, fill in the arguments, and watch the responses come back. For `card_lab` and `design_card`, the Prefab UI renders right there in the inspector — that's the same UI Claude Desktop will show you in chat.
+This opens the current FastMCP browser inspector. Click each tool, fill in the arguments, and watch the responses come back. For `preview_real_card`, `card_lab`, and `design_card`, the Prefab UI renders right there in the inspector — that's the same UI Claude Desktop or Copilot Chat will show you inline.
 
 If you want the dedicated app preview UI instead, run:
 
@@ -81,10 +82,11 @@ fastmcp dev apps server.py --mcp-port 8001 --dev-port 8081
 
 A good test sequence in the inspector:
 
-1. `fetch_real_card` → name: `pikachu` → see the card JSON
-2. `manage_collection` → action: `add`, card: (paste the result above) → "Saved Pikachu..."
-3. `card_lab` → click *Run* → a Prefab card renders below
+1. `preview_real_card` → name: `pikachu` → a visual search renders with save buttons
+2. Click **Save to collection** on one Pikachu print in the preview app
+3. `card_lab` → click *Run* → the saved card renders in the collection dashboard
 4. `design_card` → click *Run* → the Prefab card studio opens
+5. `fetch_real_card` → name: `pikachu` → inspect the raw JSON surface if you want the non-visual automation path too
 
 If those work, you're good. The MCP wire works, your Prefab installation works, and your file CRUD works.
 
@@ -133,7 +135,7 @@ Quit completely (not just close the window) and reopen. Claude Desktop only re-r
 
 ### 4. Verify the connection
 
-Inside Claude Desktop, look for a small hammer/plug icon near the message input — that's the MCP indicator. Click it and you should see "pokelab" listed with the PokéLab tools (`fetch_real_card`, `manage_collection`, `refresh_collection_images`, `card_lab`, `design_card`, `save_custom_card`) and the prompt (`design_card_walkthrough`).
+Inside Claude Desktop, look for a small hammer/plug icon near the message input — that's the MCP indicator. Click it and you should see "pokelab" listed with the PokéLab tools (`fetch_real_card`, `preview_real_card`, `manage_collection`, `refresh_collection_images`, `card_lab`, `design_card`, `save_custom_card`) and the prompt (`design_card_walkthrough`).
 
 If the server fails to start, click the indicator to see the error message. The most common causes are:
 
@@ -177,17 +179,17 @@ After adding it, run **MCP: List Servers**, start `pokelab`, trust the server wh
 
 Once the server shows up in Claude Desktop, you can interact with it in plain English.
 
-### Example 1 — single-tool call
+### Example 1 — visual real-card search
 
-> *"Use PokéLab to fetch the Charizard card and tell me its attacks."*
+> *"Open a visual PokéLab search for Pikachu."*
 
-Claude calls `fetch_real_card("charizard")`, parses the result, and answers in prose.
+Copilot calls `preview_real_card("pikachu")`. A Prefab app opens inline, lays out multiple matching prints in a compact grid, and lets you save one directly from the UI.
 
-### Example 2 — multi-tool fan-out
+### Example 2 — collection dashboard after inline save
 
-> *"Fetch Pikachu, Bulbasaur, and Squirtle. Save all three to my collection, then show me the collection."*
+> *"Show me my PokéLab collection."*
 
-Claude calls `fetch_real_card` three times, `manage_collection` three times, and finally `card_lab` once. The Prefab dashboard renders inline showing all three cards.
+After you save one or more cards in `preview_real_card`, Copilot calls `card_lab()`. The Prefab dashboard renders inline showing the persisted collection.
 
 ### Example 3 — the card studio
 
@@ -195,7 +197,13 @@ Claude calls `fetch_real_card` three times, `manage_collection` three times, and
 
 Copilot calls `design_card()`. A Prefab app opens with tabs, select menus, radio buttons, sliders, switches, checkboxes, text areas, an accordion, metrics, progress, a table, and a live card preview. The Save button calls `save_custom_card(...)` behind the scenes.
 
-### Example 4 — the slash command
+### Example 4 — raw lookup for agent automation
+
+> *"Use PokéLab to fetch the Charizard card and tell me its attacks."*
+
+Claude calls `fetch_real_card("charizard")`, parses the result, and answers in prose. That raw lookup surface still exists for chaining with `manage_collection(...)` or other non-visual tool flows.
+
+### Example 5 — the slash command
 
 In Claude Desktop's input, type `/` and you should see `design_card_walkthrough` in the prompt menu. Selecting it auto-fills the multi-tool demo prompt.
 
@@ -215,7 +223,7 @@ Claude/Copilot ──MCP/stdio──►  server.py  ──HTTP──►  Pokemon
 Three layers:
 
 1. **The MCP client** picks tools based on what you ask for.
-2. **PokéLab server (`server.py`)** runs Python functions decorated with `@mcp.tool()` (or `@mcp.tool(app=True)` for the UI tools). It calls the Pokemon TCG API, persists to a JSON file, and returns either dicts/strings or Prefab UI trees.
+2. **PokéLab server (`server.py`)** runs Python functions decorated with `@mcp.tool()` (or `@mcp.tool(app=True)` for the UI tools). It calls the Pokemon TCG API, persists to a JSON file, and returns either dicts/strings or Prefab UI trees. `preview_real_card`, `card_lab`, and `design_card` are the primary visual chat surfaces; `fetch_real_card` and `manage_collection` stay available as structured backend tools.
 3. **The data plane** — JSON file for persistence and the Pokemon TCG API for real-card content.
 
 ### The seam between MCP and Prefab
@@ -306,7 +314,7 @@ If you have multiple Python installations, make sure you're installing into the 
 
 ### `card_lab` shows an empty collection
 
-You haven't saved any cards yet. Call `fetch_real_card` first, then `manage_collection("add", card=...)`, then `card_lab`. The dashboard reads from `sandbox/collection.json` — you can also open that file in a text editor to confirm what's there.
+You haven't saved any cards yet. The most visual path is to call `preview_real_card`, click **Save to collection** on the print you want, then reopen `card_lab`. If you want the raw tool flow instead, call `fetch_real_card` first and then `manage_collection("add", card=...)`. The dashboard reads from `sandbox/collection.json` — you can also open that file in a text editor to confirm what's there.
 
 ### `design_card` opens, but Save does not persist the card
 
