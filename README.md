@@ -69,6 +69,8 @@ In Claude Desktop with the server connected, type:
 
 When each preview opens, use the inline **Save to collection** button on the print you want. The saved state flips in place, and `card_lab()` then renders the persisted collection inline when the host supports MCP Apps.
 
+The search and collection surfaces now share the same card treatment: `Moves` sections, bottom-pinned footers, weakness/resistance metadata, and symbol-prefixed rarity labels for live rarities.
+
 ---
 
 ## Setup
@@ -224,19 +226,19 @@ Once the server shows up in Claude Desktop, you can interact with it in plain En
 
 > *"Open a visual PokéLab search for Pikachu."*
 
-Copilot calls `preview_real_card("pikachu")`. A Prefab app opens inline, lays out multiple matching prints in a compact grid, shows both attack names plus weakness/resistance metadata, and lets you save one directly from the UI.
+Copilot calls `preview_real_card("pikachu")`. A Prefab app opens inline, lays out multiple matching prints in a compact grid, shows two `Moves` rows plus weakness/resistance metadata, prefixes live rarity symbols when available, and lets you save one directly from the UI.
 
 ### Example 2 — collection dashboard after inline save
 
 > *"Show me my PokéLab collection."*
 
-After you save one or more cards in `preview_real_card`, Copilot calls `card_lab()`. The Prefab dashboard renders inline showing the persisted collection.
+After you save one or more cards in `preview_real_card`, Copilot calls `card_lab()`. The Prefab dashboard renders inline showing the persisted collection with the same `Moves` labeling and symbol-prefixed rarity text used by the search cards.
 
 ### Example 3 — the card studio
 
 > *"Open the PokéLab custom card designer."*
 
-Copilot calls `design_card()`. A Prefab app opens with tabs, select menus, radio buttons, sliders, switches, checkboxes, text areas, an accordion, metrics, progress, a table, and a live card preview. The Save button calls `save_custom_card(...)` behind the scenes.
+Copilot calls `design_card()`. A Prefab app opens with identity/stats/finish tabs, select menus, stage radio buttons, sliders, switches, checkboxes, text areas, a notes accordion, summary metrics, and a live card preview. The Save button calls `save_custom_card(...)` behind the scenes.
 
 ### Example 4 — raw lookup for agent automation
 
@@ -302,7 +304,7 @@ Prefab form controls
   Claude Desktop or VS Code renders it inline
 ```
 
-This makes the project a better Prefab showcase: the card studio uses tabs, cards, inputs, selects, radio buttons, sliders, switches, checkboxes, accordions, badges, metrics, progress, tables, buttons, actions, and state templates.
+This makes the project a better Prefab showcase: the card studio uses tabs, cards, inputs, selects, radio buttons, sliders, switches, checkboxes, accordions, badges, metrics, buttons, actions, and state templates.
 
 ---
 
@@ -337,7 +339,7 @@ If you trace the code in `server.py`, every section corresponds to a Session 4 l
 | `_load_collection`/`_save_collection` (JSON) | Lesson 01 (`note_*` family, simplified) |
 | `@mcp.tool(app=True)` returning `PrefabApp` | Lesson 04C |
 | `with Card(): with CardHeader(): ...` DSL | Lesson 04A |
-| `Badge`, `Muted`, `Row`, `Column`, `Tab`, `Slider`, `Switch`, `Table` | Lesson 04D's widget catalog |
+| `Badge`, `Muted`, `Row`, `Column`, `Tab`, `Slider`, `Switch`, `Checkbox`, `Accordion` | Lesson 04D's widget catalog |
 | `CallTool`, `ShowToast`, `PrefabApp(state={...})` | Lesson 04B/04C reactive UI patterns |
 | `@mcp.prompt()` slash command | Lesson 01 (`review_code` / `debug_error`) |
 
@@ -368,6 +370,7 @@ Run the server through an MCP client that supports tool calls from Prefab action
 ### The wrong PokéLab UI opens, or the UI looks stale
 
 - Ask for the surface explicitly: say "visual live search" for `preview_real_card`, "saved collection" for `card_lab`, or "raw card data" for `fetch_real_card`.
+- If fetched cards still show an `Attacks` label or plain rarity text without symbols, the host is still serving an older app payload.
 - Restart `pokelab` from your MCP server list if the host keeps rendering an older app.
 - If the stale UI persists, stop lingering `python .../pokelab/server.py` processes and remove `pokelab/__pycache__`, then relaunch the server.
 
