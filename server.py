@@ -30,9 +30,10 @@ import json
 import os
 import sys
 import time
+from html import escape
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 # Default User-Agent — pokemontcg.io / its CDN reject the default
@@ -120,6 +121,20 @@ TYPE_STYLES = {
     "Colorless": {"bg": "bg-gray-50",     "border": "border-gray-200",   "symbol": "⭕"},
 }
 
+TYPE_ART_STYLES = {
+    "Fire":      {"start": "#fed7aa", "end": "#ffedd5", "glow": "#fb923c", "accent": "#9a3412", "text": "#431407"},
+    "Water":     {"start": "#bfdbfe", "end": "#dbeafe", "glow": "#60a5fa", "accent": "#1d4ed8", "text": "#172554"},
+    "Lightning": {"start": "#fde68a", "end": "#fef3c7", "glow": "#facc15", "accent": "#a16207", "text": "#713f12"},
+    "Grass":     {"start": "#bbf7d0", "end": "#dcfce7", "glow": "#4ade80", "accent": "#166534", "text": "#14532d"},
+    "Psychic":   {"start": "#e9d5ff", "end": "#f3e8ff", "glow": "#c084fc", "accent": "#7e22ce", "text": "#581c87"},
+    "Fighting":  {"start": "#fecaca", "end": "#fee2e2", "glow": "#f87171", "accent": "#991b1b", "text": "#450a0a"},
+    "Darkness":  {"start": "#374151", "end": "#111827", "glow": "#9ca3af", "accent": "#f9fafb", "text": "#f3f4f6"},
+    "Metal":     {"start": "#cbd5e1", "end": "#f1f5f9", "glow": "#94a3b8", "accent": "#334155", "text": "#0f172a"},
+    "Fairy":     {"start": "#fbcfe8", "end": "#fdf2f8", "glow": "#f472b6", "accent": "#9d174d", "text": "#500724"},
+    "Dragon":    {"start": "#c7d2fe", "end": "#e0e7ff", "glow": "#818cf8", "accent": "#3730a3", "text": "#312e81"},
+    "Colorless": {"start": "#e5e7eb", "end": "#f8fafc", "glow": "#cbd5e1", "accent": "#475569", "text": "#0f172a"},
+}
+
 RARITY_SYMBOL = {
     "Common":    "●",
     "Uncommon":  "◆",
@@ -144,6 +159,97 @@ CARD_TYPES = tuple(TYPE_STYLES.keys())
 CUSTOM_RARITIES = ("Common", "Uncommon", "Rare", "Rare Holo", "Custom")
 CARD_STAGES = ("Basic", "Stage 1", "Stage 2")
 CUSTOM_CARD_SOURCES = {"designed_by_llm", "designed_in_prefab"}
+
+
+def _type_art_style(types):
+        primary = (types or ["Colorless"])[0]
+        return TYPE_ART_STYLES.get(primary, TYPE_ART_STYLES["Colorless"])
+
+
+def _art_text(value, default: str, limit: int) -> str:
+        text = str(value).strip() if value is not None else ""
+        if not text:
+                text = default
+        if len(text) > limit:
+                text = f"{text[: max(0, limit - 3)].rstrip()}..."
+        return escape(text, quote=True)
+
+
+def _custom_card_image_data_uri(card: dict) -> str:
+        """Build a styled portrait illustration for custom cards."""
+        types = card.get("types") or ["Colorless"]
+        art = _type_art_style(types)
+        symbol = _type_style(types)["symbol"]
+        name = _art_text(card.get("name"), "Unnamed", 24)
+        subtitle = _art_text(card.get("subtitle"), "Custom Pokemon", 26)
+        rarity = _art_text(card.get("rarity"), "Custom", 18)
+        hp = _art_text(card.get("hp"), "?", 6)
+        flavor = _art_text(card.get("flavor"), "Designed in PokeLab.", 56)
+        primary_type = _art_text(types[0], "Colorless", 14)
+        attack_name = _art_text(
+                ((card.get("attacks") or [{}])[0]).get("name"),
+                "Signature Move",
+                24,
+        )
+        secondary_badge = ""
+        if len(types) > 1:
+                secondary_type = _art_text(types[1], "", 14)
+                secondary_badge = (
+                        "<g transform='translate(408 126)'>"
+                        "<rect x='0' y='0' width='176' height='36' rx='18' fill='white' fill-opacity='0.14'/>"
+                        f"<text x='88' y='24' text-anchor='middle' font-family='Segoe UI, sans-serif' font-size='16' font-weight='600' fill='{art['text']}' fill-opacity='0.84'>{secondary_type}</text>"
+                        "</g>"
+                )
+
+        svg = f"""
+<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 640 900' role='img' aria-label='{name} custom card art'>
+    <defs>
+        <linearGradient id='bg' x1='0%' y1='0%' x2='100%' y2='100%'>
+            <stop offset='0%' stop-color='{art['start']}'/>
+            <stop offset='100%' stop-color='{art['end']}'/>
+        </linearGradient>
+        <radialGradient id='flare' cx='80%' cy='18%' r='62%'>
+            <stop offset='0%' stop-color='{art['glow']}' stop-opacity='0.95'/>
+            <stop offset='100%' stop-color='{art['glow']}' stop-opacity='0'/>
+        </radialGradient>
+    </defs>
+    <rect width='640' height='900' rx='36' fill='url(#bg)'/>
+    <rect x='18' y='18' width='604' height='864' rx='30' fill='none' stroke='white' stroke-opacity='0.24' stroke-width='2'/>
+    <circle cx='522' cy='166' r='164' fill='url(#flare)'/>
+    <path d='M0 564 C 110 500, 214 610, 326 574 S 520 476, 640 520 L 640 900 L 0 900 Z' fill='white' fill-opacity='0.16'/>
+    <path d='M34 420 C 136 362, 246 430, 344 398 S 536 314, 606 358' fill='none' stroke='white' stroke-opacity='0.22' stroke-width='14' stroke-linecap='round'/>
+    <g transform='translate(52 54)'>
+        <rect x='0' y='0' width='184' height='38' rx='19' fill='white' fill-opacity='0.72'/>
+        <text x='18' y='25' font-family='Segoe UI, sans-serif' font-size='18' font-weight='700' fill='{art['accent']}'>CUSTOM LAB</text>
+        <text x='0' y='188' font-family='Segoe UI Emoji, Segoe UI Symbol, sans-serif' font-size='120'>{symbol}</text>
+        <text x='0' y='288' font-family='Segoe UI, sans-serif' font-size='50' font-weight='700' fill='{art['text']}'>{name}</text>
+        <text x='0' y='326' font-family='Segoe UI, sans-serif' font-size='24' fill='{art['text']}' fill-opacity='0.78'>{subtitle}</text>
+    </g>
+    <g transform='translate(408 78)'>
+        <rect x='0' y='0' width='176' height='40' rx='20' fill='white' fill-opacity='0.24'/>
+        <text x='88' y='26' text-anchor='middle' font-family='Segoe UI, sans-serif' font-size='16' font-weight='600' fill='{art['text']}'>{primary_type}</text>
+    </g>
+    {secondary_badge}
+    <g transform='translate(48 610)'>
+        <rect x='0' y='0' width='544' height='228' rx='28' fill='white' fill-opacity='0.14'/>
+        <text x='28' y='44' font-family='Segoe UI, sans-serif' font-size='18' fill='{art['text']}' fill-opacity='0.72'>Signature Move</text>
+        <text x='28' y='88' font-family='Segoe UI, sans-serif' font-size='32' font-weight='700' fill='{art['text']}'>{attack_name}</text>
+        <text x='28' y='130' font-family='Segoe UI, sans-serif' font-size='22' fill='{art['text']}' fill-opacity='0.74'>{flavor}</text>
+        <text x='28' y='188' font-family='Segoe UI, sans-serif' font-size='20' fill='{art['text']}' fill-opacity='0.74'>{rarity} • HP {hp}</text>
+        <text x='28' y='212' font-family='Segoe UI, sans-serif' font-size='16' fill='{art['text']}' fill-opacity='0.62'>Designed in PokeLab</text>
+    </g>
+</svg>
+""".strip()
+        return f"data:image/svg+xml;charset=utf-8,{quote(svg)}"
+
+
+def _card_image_url(card: dict) -> str:
+        image_url = card.get("image_url", "")
+        if isinstance(image_url, str) and image_url:
+                return image_url
+        if card.get("source") in CUSTOM_CARD_SOURCES:
+                return _custom_card_image_data_uri(card)
+        return ""
 
 
 # ===========================================================================
@@ -340,7 +446,14 @@ def refresh_collection_images() -> str:
         existing = card.get("image_url", "")
         is_custom = card.get("source") in CUSTOM_CARD_SOURCES
         is_data_uri = isinstance(existing, str) and existing.startswith("data:")
-        if is_custom or is_data_uri:
+        if is_custom:
+            if is_data_uri:
+                skipped += 1
+            else:
+                card["image_url"] = _custom_card_image_data_uri(card)
+                updated += 1
+            continue
+        if is_data_uri:
             skipped += 1
             continue
         card_id = card.get("id", "")
@@ -395,35 +508,48 @@ def _render_card(card: dict) -> None:
     style    = _type_style(types)
     bg       = style["bg"]
     symbol   = style["symbol"]
+    type_symbols = _energy_symbols(types) or symbol
     is_dark  = types[0] == "Darkness"
-    text_cls = "text-white" if is_dark else ""
+    title_cls = "text-white drop-shadow-sm" if is_dark else "text-slate-950"
+    subtitle_cls = "text-slate-200" if is_dark else "text-slate-700"
+    chip_cls = (
+        "rounded-full border border-white/15 bg-white/10 px-2.5 py-1 shadow-sm"
+        if is_dark else
+        "rounded-full border border-white/70 bg-white/80 px-2.5 py-1 shadow-sm"
+    )
+    metric_cls = (
+        "rounded-2xl border border-white/15 bg-white/10 px-3 py-1.5 shadow-sm"
+        if is_dark else
+        "rounded-2xl border border-white/70 bg-white/85 px-3 py-1.5 shadow-sm"
+    )
     name     = card.get("name", "Unknown")
     hp       = card.get("hp", "?")
     rarity   = card.get("rarity", "")
     rarity_sym = RARITY_SYMBOL.get(rarity, "")
+    rarity_label = rarity_sym or rarity or ("Custom" if card.get("source") in CUSTOM_CARD_SOURCES else "")
 
     with Card(css_class="overflow-hidden shadow-md hover:shadow-xl transition-shadow duration-200"):
 
         # — Coloured header band ———————————————————————————————————————————
         with CardHeader(css_class=f"{bg} border-b {style['border']}"):
             with Row(justify="between", align="start"):
-                with Column(gap=0):
-                    with Row(gap=1, align="center"):
-                        Text(symbol, css_class="text-lg")
-                        CardTitle(name, css_class=f"text-base {text_cls}")
+                with Column(gap=1):
+                    with Row(gap=2, align="center"):
+                        with Row(gap=1, align="center", css_class=chip_cls):
+                            Text(type_symbols, css_class="text-sm")
+                        CardTitle(name, css_class=f"text-lg font-semibold tracking-tight leading-none {title_cls}")
                     if card.get("subtitle"):
                         CardDescription(
                             card["subtitle"],
-                            css_class=f"text-xs {'text-gray-300' if is_dark else ''}",
+                            css_class=f"text-sm font-medium {subtitle_cls}",
                         )
-                with Column(gap=0, align="end"):
-                    Text(f"{hp} HP",
-                         css_class=f"text-xl font-extrabold {'text-white' if is_dark else 'text-gray-700'}")
-                    if rarity_sym:
-                        Muted(rarity_sym, css_class="text-xs text-right")
+                with Column(gap=0, align="end", css_class=metric_cls):
+                    Text(f"{hp} HP", css_class=f"text-xl font-black leading-none {title_cls}")
+                    if rarity_label:
+                        Text(rarity_label, css_class=f"text-xs font-medium {subtitle_cls}")
 
         # — Card image ———————————————————————————————————————————————————
-        img_url = card.get("image_url", "")
+        img_url = _card_image_url(card)
         if img_url:
             with CardContent():
                 Image(
@@ -589,7 +715,7 @@ def _build_custom_card(
         ) if attack
     ]
 
-    return {
+    card = {
         "id": card_id,
         "name": name.strip() or "Unnamed",
         "hp": str(_coerce_int(hp, default=80, minimum=30, maximum=220)),
@@ -611,6 +737,8 @@ def _build_custom_card(
         "image_url": "",
         "source": "designed_in_prefab",
     }
+    card["image_url"] = _custom_card_image_data_uri(card)
+    return card
 
 
 @mcp.tool()
