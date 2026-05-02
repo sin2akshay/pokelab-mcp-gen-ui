@@ -81,12 +81,6 @@ from prefab_ui.components import (
     Slider,
     Switch,
     Tab,
-    Table,
-    TableBody,
-    TableCell,
-    TableHead,
-    TableHeader,
-    TableRow,
     Tabs,
     Text,
     Textarea,
@@ -144,8 +138,10 @@ TYPE_ART_STYLES = {
 RARITY_SYMBOL = {
     "Common":    "●",
     "Uncommon":  "◆",
+    "Promo":     "★",
     "Rare":      "★",
     "Rare Holo": "★✦",
+    "Rare Ultra": "★★",
 }
 
 
@@ -159,6 +155,27 @@ def _energy_symbols(cost):
         TYPE_STYLES.get(c, TYPE_STYLES["Colorless"])["symbol"]
         for c in cost
     )
+
+
+def _rarity_symbol(rarity: str) -> str:
+    normalized = rarity.strip()
+    if not normalized:
+        return ""
+    if normalized in RARITY_SYMBOL:
+        return RARITY_SYMBOL[normalized]
+    if normalized.startswith("Rare Holo"):
+        return "★✦"
+    if normalized.startswith("Rare "):
+        return "★"
+    return ""
+
+
+def _format_rarity_label(rarity: str, *, source: str = "") -> str:
+    normalized = rarity.strip()
+    if normalized:
+        symbol = _rarity_symbol(normalized)
+        return f"{symbol} {normalized}".strip() if symbol else normalized
+    return "Custom" if source in CUSTOM_CARD_SOURCES else ""
 
 
 CARD_TYPES = tuple(TYPE_STYLES.keys())
@@ -665,6 +682,15 @@ def _render_art_stage(
                 Text(symbol, css_class="text-5xl opacity-30")
 
 
+def _render_bound_energy_pill(field_name: str) -> None:
+    for energy_type, style in TYPE_STYLES.items():
+        with If(f"{field_name} == '{energy_type}'"):
+            Text(
+                style["symbol"],
+                css_class="rounded-full border border-stone-200 bg-white px-2.5 py-1 text-sm shadow-sm",
+            )
+
+
 def _render_attack_stage(attacks: list[dict], *, compact: bool = False) -> None:
     visible_attacks = _attack_slots(attacks, limit=2) if compact else list(attacks)
 
@@ -737,6 +763,7 @@ def _render_search_result_card(
     name = card.get("name", "Unknown")
     hp = card.get("hp", "?")
     rarity = card.get("rarity", "") or "Unknown"
+    rarity_label = _format_rarity_label(rarity, source=str(card.get("source", "")))
     subtitle = card.get("subtitle", "")
     set_name = card.get("set", "")
     number = card.get("number", "")
@@ -752,7 +779,7 @@ def _render_search_result_card(
             subtitle_text,
             types=types,
             hp=hp,
-            rarity_label=rarity,
+            rarity_label=rarity_label,
             bg=bg,
             border_cls=style["border"],
             compact=True,
@@ -822,8 +849,7 @@ def _render_card(
     name     = card.get("name", "Unknown")
     hp       = card.get("hp", "?")
     rarity   = card.get("rarity", "")
-    rarity_sym = RARITY_SYMBOL.get(rarity, "")
-    rarity_label = rarity_sym or rarity or ("Custom" if card.get("source") in CUSTOM_CARD_SOURCES else "")
+    rarity_label = _format_rarity_label(rarity, source=str(card.get("source", "")))
     subtitle = card.get("subtitle", "")
     set_name = card.get("set", "")
     number = card.get("number", "")
@@ -1239,14 +1265,14 @@ def _render_live_card_preview() -> None:
                     with Column(gap=2, css_class="rounded-2xl border border-stone-200 bg-stone-50/90 px-3 py-3 shadow-sm"):
                         with Row(justify="between", align="center", css_class="gap-2"):
                             with Row(gap=2, align="center"):
-                                Text("{{ attack_1_cost }}", css_class="rounded-full border border-stone-200 bg-white px-2.5 py-1 text-xs shadow-sm")
+                                _render_bound_energy_pill("attack_1_cost")
                                 Text("{{ attack_1_name }}", css_class="text-sm font-semibold text-slate-900")
                             Text("{{ attack_1_damage }}", css_class="rounded-full border border-stone-200 bg-white px-2.5 py-1 text-xs font-bold text-slate-900 shadow-sm")
                         Muted("{{ attack_1_text }}", css_class="text-xs leading-relaxed text-slate-600")
                     with Column(gap=2, css_class="rounded-2xl border border-stone-200 bg-stone-50/90 px-3 py-3 shadow-sm"):
                         with Row(justify="between", align="center", css_class="gap-2"):
                             with Row(gap=2, align="center"):
-                                Text("{{ attack_2_cost }}", css_class="rounded-full border border-stone-200 bg-white px-2.5 py-1 text-xs shadow-sm")
+                                _render_bound_energy_pill("attack_2_cost")
                                 Text("{{ attack_2_name }}", css_class="text-sm font-semibold text-slate-900")
                             Text("{{ attack_2_damage }}", css_class="rounded-full border border-stone-200 bg-white px-2.5 py-1 text-xs font-bold text-slate-900 shadow-sm")
                         Muted("{{ attack_2_text }}", css_class="text-xs leading-relaxed text-slate-600")
@@ -1321,7 +1347,7 @@ def design_card() -> PrefabApp:
                                         Input(name="name", placeholder="Embersprite", required=True)
                                     with Column(gap=2):
                                         Text("Stage", css_class="text-sm font-medium")
-                                        with RadioGroup(name="stage", value="Basic"):
+                                        with RadioGroup(name="stage"):
                                             with Row(gap=3):
                                                 for stage in CARD_STAGES:
                                                     Radio(option=stage, label=stage)
@@ -1425,27 +1451,6 @@ def design_card() -> PrefabApp:
 
                 with Column(gap=4):
                     _render_live_card_preview()
-                    with Card():
-                        with CardHeader():
-                            CardTitle("Card sheet")
-                            CardDescription("A compact table preview of the saved fields.")
-                        with CardContent():
-                            with Table():
-                                with TableHeader():
-                                    with TableRow():
-                                        TableHead("Field")
-                                        TableHead("Value")
-                                with TableBody():
-                                    for field, value in (
-                                        ("Name", "{{ name }}"),
-                                        ("Types", "{{ primary_type }} / {{ secondary_type }}"),
-                                        ("Weakness", "{{ weakness_type }} {{ weakness_value }}"),
-                                        ("Resistance", "{{ resistance_type ? resistance_type + ' ' + resistance_value : '—' }}"),
-                                        ("Illustrator", "{{ illustrator }}"),
-                                    ):
-                                        with TableRow():
-                                            TableCell(field)
-                                            TableCell(value)
 
     return app
 
