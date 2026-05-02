@@ -4,18 +4,18 @@ PokéLab — an MCP server that fetches, saves, designs, and renders Pokemon car
 Stitches together every Session 4 pattern:
     Lesson 01  @mcp.tool(), file CRUD, sandbox folder, HTTP fetch
   Lesson 02  mcp.run() entry point, stdio transport
-  Lesson 03  Gemini integration (inside the server this time)
   Lesson 04A Prefab DSL, nested with-blocks
   Lesson 04B Rx + SetState reactive state
   Lesson 04C @mcp.tool(app=True) returning a PrefabApp
-  Lesson 04D Talk-to-App planner — LLM emits JSON spec, Python renders it
+    Lesson 04D Talk-to-App pattern — structured inputs, Python renders them
 
 Tools exposed:
   fetch_real_card(name)       — internet:    Pokemon TCG API (includes card image)
   manage_collection(action,…) — file CRUD:   sandbox/collection.json
   refresh_collection_images() — internet:    backfills image URLs for old saved cards
   card_lab()                  — Prefab UI:   renders collection as a styled grid
-  design_card(prompt)         — stretch:     LLM designs a card; same renderer
+    design_card()               — Prefab UI:   form-driven custom card designer
+    save_custom_card(...)       — file CRUD:   saves a designed card from the UI
 
 Run:
     python server.py                    # stdio mode for Claude Desktop
@@ -36,21 +36,45 @@ from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
 from fastmcp import FastMCP
+from prefab_ui.actions import ShowToast
+from prefab_ui.actions.mcp import CallTool
 from prefab_ui.app import PrefabApp
 from prefab_ui.components import (
+    Accordion,
+    AccordionItem,
     Badge,
+    Button,
     Card,
     CardDescription,
     CardContent,
     CardHeader,
     CardTitle,
+    Checkbox,
     Column,
     Grid,
     Image,
+    Input,
+    Metric,
     Muted,
+    Progress,
+    Radio,
+    RadioGroup,
     Row,
     Separator,
+    Select,
+    SelectOption,
+    Slider,
+    Switch,
+    Tab,
+    Table,
+    TableBody,
+    TableCell,
+    TableHead,
+    TableHeader,
+    TableRow,
+    Tabs,
     Text,
+    Textarea,
 )
 
 load_dotenv()
@@ -105,6 +129,12 @@ def _energy_symbols(cost):
         TYPE_STYLES.get(c, TYPE_STYLES["Colorless"])["symbol"]
         for c in cost
     )
+
+
+CARD_TYPES = tuple(TYPE_STYLES.keys())
+CUSTOM_RARITIES = ("Common", "Uncommon", "Rare", "Rare Holo", "Custom")
+CARD_STAGES = ("Basic", "Stage 1", "Stage 2")
+CUSTOM_CARD_SOURCES = {"designed_by_llm", "designed_in_prefab"}
 
 
 # ===========================================================================
@@ -255,7 +285,7 @@ def refresh_collection_images() -> str:
         headers["X-Api-Key"] = api_key
 
     for card in cards:
-        if card.get("image_url") or card.get("source") == "designed_by_llm":
+        if card.get("image_url") or card.get("source") in CUSTOM_CARD_SOURCES:
             skipped += 1
             continue
         card_id = card.get("id", "")
@@ -369,7 +399,7 @@ def _render_card(card: dict) -> None:
                           css_class="text-xs text-right")
             if card.get("flavor"):
                 Muted(card["flavor"], css_class="text-xs italic mt-2 block")
-            if card.get("source") == "designed_by_llm":
+            if card.get("source") in CUSTOM_CARD_SOURCES:
                 Badge("✦ Custom", variant="secondary", css_class="text-xs mt-1")
 
 
@@ -400,115 +430,397 @@ def card_lab() -> PrefabApp:
 
 
 # ===========================================================================
-# 4. DESIGN CARD — Talk-to-App stretch tool
+# 4. DESIGN CARD — Prefab form + deterministic renderer
 # ===========================================================================
 
-CARD_DESIGNER_PROMPT = """You design Pokemon Trading Card Game cards. Given the user's
-description, respond with EXACTLY ONE JSON object describing one card.
-
-Required shape:
-{{
-  "name": "<short evocative name, 1-2 words>",
-  "hp": <integer between 30 and 220>,
-  "types": [<one or two of: Fire, Water, Grass, Lightning, Psychic,
-                            Fighting, Darkness, Metal, Fairy, Dragon, Colorless>],
-  "subtitle": "<flavor subtitle, e.g. 'Candle Sprite Pokemon'>",
-  "attacks": [
-    {{"name": "<short>", "cost": [<types from same list>], "damage": "<e.g. '20' or '40+'>",
-      "text": "<one short rules sentence>"}}
-  ],
-  "weakness": {{"type": "<type>", "value": "<e.g. '+20' or 'x2'>"}},
-  "flavor": "<one-line flavor text>"
-}}
-
-Balance: Basic ~30-90 HP, Stage 2 ~100-170 HP. Cost and damage should scale together.
-Respond with JSON only - no markdown fences, no prose.
-
-User request: {prompt}
-"""
+def _coerce_int(value, default: int, minimum: int, maximum: int) -> int:
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError):
+        number = default
+    return max(minimum, min(maximum, number))
 
 
-def _call_gemini(prompt: str) -> str:
-    from google import genai
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY not set in .env")
-    client = genai.Client(api_key=api_key)
-    model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
-    response = client.models.generate_content(model=model, contents=prompt)
-    return (response.text or "").strip()
+def _choice(value: str | None, allowed: tuple[str, ...], default: str) -> str:
+    return value if value in allowed else default
 
 
-def _strip_fences(raw: str) -> str:
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.strip("`")
-        if raw.lower().startswith("json"):
-            raw = raw[4:]
-        raw = raw.strip()
-    return raw
+def _boolish(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
-def _error_card_app(message: str) -> PrefabApp:
-    with PrefabApp() as app:
-        with Column(gap=4, css_class="max-w-md mx-auto p-6"):
-            with Card():
-                with CardHeader():
-                    CardTitle("Card design failed")
-                    CardDescription("Try rephrasing and call design_card again.")
-                with CardContent():
-                    Muted(message)
-    return app
+def _custom_attack(name: str, cost: str, damage: str, text: str) -> dict | None:
+    if not any((name, damage, text)):
+        return None
+    energy_type = _choice(cost, CARD_TYPES, "Colorless")
+    return {
+        "name": name.strip() or "Tackle",
+        "cost": [energy_type],
+        "damage": damage.strip(),
+        "text": text.strip(),
+    }
+
+
+def _next_custom_id(cards: list[dict]) -> str:
+    existing_ids = []
+    for card in cards:
+        card_id = str(card.get("id", ""))
+        if card_id.startswith("custom-"):
+            try:
+                existing_ids.append(int(card_id.removeprefix("custom-")))
+            except ValueError:
+                pass
+    next_id = max(existing_ids, default=0) + 1
+    return f"custom-{next_id:03d}"
+
+
+def _build_custom_card(
+    *,
+    card_id: str,
+    name: str,
+    hp,
+    primary_type: str,
+    secondary_type: str = "",
+    stage: str = "Basic",
+    rarity: str = "Rare",
+    attack_1_name: str = "",
+    attack_1_cost: str = "Colorless",
+    attack_1_damage: str = "",
+    attack_1_text: str = "",
+    attack_2_name: str = "",
+    attack_2_cost: str = "Colorless",
+    attack_2_damage: str = "",
+    attack_2_text: str = "",
+    weakness_type: str = "Water",
+    weakness_value: str = "x2",
+    flavor: str = "",
+    illustrator: str = "PokeLab",
+    holo=False,
+    first_edition=False,
+    notes: str = "",
+) -> dict:
+    primary = _choice(primary_type, CARD_TYPES, "Colorless")
+    secondary = secondary_type if secondary_type in CARD_TYPES and secondary_type != primary else ""
+    attacks = [
+        attack for attack in (
+            _custom_attack(attack_1_name, attack_1_cost, attack_1_damage, attack_1_text),
+            _custom_attack(attack_2_name, attack_2_cost, attack_2_damage, attack_2_text),
+        ) if attack
+    ]
+
+    return {
+        "id": card_id,
+        "name": name.strip() or "Unnamed",
+        "hp": str(_coerce_int(hp, default=80, minimum=30, maximum=220)),
+        "types": [primary, *([secondary] if secondary else [])],
+        "subtitle": stage if stage in CARD_STAGES else "Basic",
+        "attacks": attacks,
+        "weakness": {
+            "type": _choice(weakness_type, CARD_TYPES, "Colorless"),
+            "value": weakness_value.strip() or "x2",
+        },
+        "set": "Custom Lab",
+        "number": card_id.replace("custom-", "C"),
+        "rarity": _choice(rarity, CUSTOM_RARITIES, "Custom"),
+        "flavor": flavor.strip(),
+        "illustrator": illustrator.strip() or "PokeLab",
+        "holo": _boolish(holo),
+        "first_edition": _boolish(first_edition),
+        "notes": notes.strip(),
+        "image_url": "",
+        "source": "designed_in_prefab",
+    }
+
+
+@mcp.tool()
+def save_custom_card(
+    name: str,
+    hp: int | str = 80,
+    primary_type: str = "Fire",
+    secondary_type: str = "Fairy",
+    stage: str = "Basic",
+    rarity: str = "Rare",
+    attack_1_name: str = "Temple Wick",
+    attack_1_cost: str = "Fire",
+    attack_1_damage: str = "30",
+    attack_1_text: str = "Heal 10 damage from this Pokemon.",
+    attack_2_name: str = "Fairy Flare",
+    attack_2_cost: str = "Fairy",
+    attack_2_damage: str = "60+",
+    attack_2_text: str = "If this Pokemon has a status condition, this attack does 30 more damage.",
+    weakness_type: str = "Water",
+    weakness_value: str = "x2",
+    flavor: str = "Small temple flames gather around it when wishes are spoken.",
+    illustrator: str = "PokeLab",
+    holo: bool | str = True,
+    first_edition: bool | str = False,
+    notes: str = "",
+) -> dict:
+    """Save a custom card submitted from the Prefab card designer UI."""
+    cards = _load_collection()
+    card = _build_custom_card(
+        card_id=_next_custom_id(cards),
+        name=name,
+        hp=hp,
+        primary_type=primary_type,
+        secondary_type=secondary_type,
+        stage=stage,
+        rarity=rarity,
+        attack_1_name=attack_1_name,
+        attack_1_cost=attack_1_cost,
+        attack_1_damage=attack_1_damage,
+        attack_1_text=attack_1_text,
+        attack_2_name=attack_2_name,
+        attack_2_cost=attack_2_cost,
+        attack_2_damage=attack_2_damage,
+        attack_2_text=attack_2_text,
+        weakness_type=weakness_type,
+        weakness_value=weakness_value,
+        flavor=flavor,
+        illustrator=illustrator,
+        holo=holo,
+        first_edition=first_edition,
+        notes=notes,
+    )
+    cards.append(card)
+    _save_collection(cards)
+    return {"message": f"Saved {card['name']} as {card['id']}", "card": card}
+
+
+def _select_options(options: tuple[str, ...]) -> None:
+    for option in options:
+        SelectOption(option, value=option)
+
+
+def _save_card_action() -> CallTool:
+    return CallTool(
+        "save_custom_card",
+        arguments={
+            "name": "{{ name }}",
+            "hp": "{{ hp }}",
+            "primary_type": "{{ primary_type }}",
+            "secondary_type": "{{ secondary_type }}",
+            "stage": "{{ stage }}",
+            "rarity": "{{ rarity }}",
+            "attack_1_name": "{{ attack_1_name }}",
+            "attack_1_cost": "{{ attack_1_cost }}",
+            "attack_1_damage": "{{ attack_1_damage }}",
+            "attack_1_text": "{{ attack_1_text }}",
+            "attack_2_name": "{{ attack_2_name }}",
+            "attack_2_cost": "{{ attack_2_cost }}",
+            "attack_2_damage": "{{ attack_2_damage }}",
+            "attack_2_text": "{{ attack_2_text }}",
+            "weakness_type": "{{ weakness_type }}",
+            "weakness_value": "{{ weakness_value }}",
+            "flavor": "{{ flavor }}",
+            "illustrator": "{{ illustrator }}",
+            "holo": "{{ holo }}",
+            "first_edition": "{{ first_edition }}",
+            "notes": "{{ notes }}",
+        },
+        on_success=ShowToast(
+            "Card saved",
+            description="{{ name }} is now in sandbox/collection.json.",
+            variant="success",
+        ),
+        on_error=ShowToast("Save failed", description="{{ $error }}", variant="error"),
+    )
+
+
+def _render_live_card_preview() -> None:
+    with Card(css_class="overflow-hidden shadow-lg"):
+        with CardHeader(css_class="bg-amber-100 border-b border-amber-300"):
+            with Row(justify="between", align="start"):
+                with Column(gap=1):
+                    with Row(gap=1, align="center"):
+                        Text("✦", css_class="text-lg")
+                        CardTitle("{{ name }}", css_class="text-base")
+                    CardDescription("{{ stage }} · {{ primary_type }} / {{ secondary_type }}")
+                Text("{{ hp }} HP", css_class="text-xl font-extrabold text-gray-700")
+        with CardContent():
+            with Column(gap=3):
+                with Row(gap=2):
+                    Badge("{{ primary_type }}", variant="secondary")
+                    Badge("{{ rarity }}", variant="info")
+                    Badge("{{ holo ? 'Holo' : 'Matte' }}", variant="success")
+                Progress(value="{{ hp }}", max=220, target=120, variant="warning", gradient=True)
+                Separator()
+                with Column(gap=2):
+                    with Row(justify="between", align="center"):
+                        Text("{{ attack_1_cost }} {{ attack_1_name }}", css_class="font-semibold text-sm")
+                        Text("{{ attack_1_damage }}", css_class="font-bold text-sm")
+                    Muted("{{ attack_1_text }}", css_class="text-xs leading-tight")
+                    with Row(justify="between", align="center"):
+                        Text("{{ attack_2_cost }} {{ attack_2_name }}", css_class="font-semibold text-sm")
+                        Text("{{ attack_2_damage }}", css_class="font-bold text-sm")
+                    Muted("{{ attack_2_text }}", css_class="text-xs leading-tight")
+                Separator()
+                Muted("{{ flavor }}", css_class="text-xs italic")
 
 
 @mcp.tool(app=True)
-def design_card(prompt: str) -> PrefabApp:
-    """Design a custom Pokemon card from an English description using an LLM.
-    The LLM fills in a JSON spec; Python renders it through _render_card().
-    Example: 'a fire-fairy hybrid called Embersprite, 80 HP, temple flame attacks'
-    """
-    try:
-        raw = _call_gemini(CARD_DESIGNER_PROMPT.format(prompt=prompt))
-    except Exception as e:
-        return _error_card_app(f"LLM call failed: {e}")
-
-    try:
-        spec = json.loads(_strip_fences(raw))
-    except json.JSONDecodeError as e:
-        return _error_card_app(f"Couldn't parse LLM response as JSON ({e}). Got: {raw[:200]}")
-
-    cards = _load_collection()
-    next_id = sum(1 for c in cards if c.get("source") == "designed_by_llm") + 1
-    card = {
-        "id": f"custom-{next_id:03d}",
-        "name": str(spec.get("name", "Unnamed")),
-        "hp": str(spec.get("hp", "?")),
-        "types": spec.get("types", ["Colorless"]),
-        "subtitle": str(spec.get("subtitle", "Custom Pokemon")),
-        "attacks": [
-            {"name": str(a.get("name", "Attack")), "cost": a.get("cost", []),
-             "damage": str(a.get("damage", "")), "text": str(a.get("text", ""))}
-            for a in spec.get("attacks", [])
-        ],
-        "weakness": spec.get("weakness"),
-        "set": "Custom Lab",
-        "number": f"C{next_id:03d}",
-        "rarity": "Custom",
-        "flavor": spec.get("flavor", ""),
-        "image_url": "",
-        "source": "designed_by_llm",
+def design_card() -> PrefabApp:
+    """Open an interactive Prefab card designer instead of asking for a long prompt."""
+    initial_state = {
+        "name": "Embersprite",
+        "hp": 80,
+        "primary_type": "Fire",
+        "secondary_type": "Fairy",
+        "stage": "Basic",
+        "rarity": "Rare Holo",
+        "attack_1_name": "Temple Wick",
+        "attack_1_cost": "Fire",
+        "attack_1_damage": "30",
+        "attack_1_text": "Heal 10 damage from this Pokemon.",
+        "attack_2_name": "Fairy Flare",
+        "attack_2_cost": "Fairy",
+        "attack_2_damage": "60+",
+        "attack_2_text": "If this Pokemon has a status condition, this attack does 30 more damage.",
+        "weakness_type": "Water",
+        "weakness_value": "x2",
+        "flavor": "Small temple flames gather around it when wishes are spoken.",
+        "illustrator": "PokeLab",
+        "holo": True,
+        "first_edition": False,
+        "notes": "Balanced for a fast Basic card with a light sustain hook.",
     }
 
-    cards.append(card)
-    _save_collection(cards)
+    with PrefabApp(state=initial_state) as app:
+        with Column(gap=5, css_class="max-w-6xl mx-auto p-6"):
+            with Row(justify="between", align="center"):
+                with Column(gap=1):
+                    Text("PokéLab Card Studio", css_class="text-2xl font-bold")
+                    Muted("Build a custom card with Prefab controls, preview it live, then save it to the collection.")
+                Button("Save card", icon="save", variant="success", on_click=_save_card_action())
 
-    with PrefabApp() as app:
-        with Column(gap=2, css_class="max-w-sm mx-auto p-6"):
-            _render_card(card)
-            Muted(
-                f"Saved as {card['id']}. Call card_lab() to see your full collection.",
-                css_class="text-xs text-center mt-2",
-            )
+            with Grid(columns=[2, 1], gap=4):
+                with Tabs(value="identity", variant="line"):
+                    with Tab("Identity", value="identity"):
+                        with Card():
+                            with CardHeader():
+                                CardTitle("Card identity")
+                                CardDescription("Names, types, rarity, and collection metadata.")
+                            with CardContent():
+                                with Grid(columns=2, gap=4):
+                                    with Column(gap=2):
+                                        Text("Name", css_class="text-sm font-medium")
+                                        Input(name="name", placeholder="Embersprite", required=True)
+                                    with Column(gap=2):
+                                        Text("Stage", css_class="text-sm font-medium")
+                                        with RadioGroup(name="stage", value="Basic"):
+                                            with Row(gap=3):
+                                                for stage in CARD_STAGES:
+                                                    Radio(option=stage, label=stage)
+                                    with Column(gap=2):
+                                        Text("Primary type", css_class="text-sm font-medium")
+                                        with Select(name="primary_type", placeholder="Choose a type"):
+                                            _select_options(CARD_TYPES)
+                                    with Column(gap=2):
+                                        Text("Secondary type", css_class="text-sm font-medium")
+                                        with Select(name="secondary_type", placeholder="Optional"):
+                                            SelectOption("None", value="")
+                                            _select_options(CARD_TYPES)
+                                    with Column(gap=2):
+                                        Text("Rarity", css_class="text-sm font-medium")
+                                        with Select(name="rarity", placeholder="Choose rarity"):
+                                            _select_options(CUSTOM_RARITIES)
+                                    with Column(gap=2):
+                                        Text("Illustrator", css_class="text-sm font-medium")
+                                        Input(name="illustrator", placeholder="PokeLab")
+
+                    with Tab("Stats", value="stats"):
+                        with Card():
+                            with CardHeader():
+                                CardTitle("Battle stats")
+                                CardDescription("Tune HP, attacks, weakness, and battle flavor.")
+                            with CardContent():
+                                with Column(gap=4):
+                                    with Grid(columns=3, gap=4):
+                                        Metric(label="HP", value="{{ hp }}", description="30 to 220")
+                                        Metric(label="Primary", value="{{ primary_type }}", description="Main energy")
+                                        Metric(label="Rarity", value="{{ rarity }}", description="Print style")
+                                    with Column(gap=2):
+                                        with Row(justify="between", align="center"):
+                                            Text("HP", css_class="text-sm font-medium")
+                                            Badge("{{ hp }}", variant="warning")
+                                        Slider(name="hp", value="{{ hp }}", min=30, max=220, step=10, gradient=True)
+                                    Separator()
+                                    with Grid(columns=2, gap=4):
+                                        with Column(gap=2):
+                                            Text("Attack 1", css_class="text-sm font-medium")
+                                            Input(name="attack_1_name", placeholder="Attack name")
+                                            with Select(name="attack_1_cost", placeholder="Energy cost"):
+                                                _select_options(CARD_TYPES)
+                                            Input(name="attack_1_damage", placeholder="30", input_type="text")
+                                            Textarea(name="attack_1_text", rows=3, placeholder="One short rules sentence")
+                                        with Column(gap=2):
+                                            Text("Attack 2", css_class="text-sm font-medium")
+                                            Input(name="attack_2_name", placeholder="Attack name")
+                                            with Select(name="attack_2_cost", placeholder="Energy cost"):
+                                                _select_options(CARD_TYPES)
+                                            Input(name="attack_2_damage", placeholder="60+", input_type="text")
+                                            Textarea(name="attack_2_text", rows=3, placeholder="One short rules sentence")
+
+                    with Tab("Finish", value="finish"):
+                        with Card():
+                            with CardHeader():
+                                CardTitle("Finishing touches")
+                                CardDescription("Use optional controls to make the card feel collectible.")
+                            with CardContent():
+                                with Column(gap=4):
+                                    with Grid(columns=2, gap=4):
+                                        with Column(gap=2):
+                                            Text("Weakness type", css_class="text-sm font-medium")
+                                            with Select(name="weakness_type", placeholder="Choose weakness"):
+                                                _select_options(CARD_TYPES)
+                                        with Column(gap=2):
+                                            Text("Weakness value", css_class="text-sm font-medium")
+                                            Input(name="weakness_value", placeholder="x2")
+                                    with Row(gap=4, align="center"):
+                                        Switch(name="holo", label="Holographic finish", value="{{ holo }}")
+                                        Checkbox(name="first_edition", label="First edition stamp", value="{{ first_edition }}")
+                                    Textarea(name="flavor", rows=3, placeholder="Flavor text")
+                                    with Accordion(default_open_items=0):
+                                        with AccordionItem("Designer notes", value="notes"):
+                                            Textarea(name="notes", rows=4, placeholder="Private balancing notes")
+                                    with Row(gap=2):
+                                        Button("Save card", icon="save", variant="success", on_click=_save_card_action())
+                                        Button(
+                                            "Open collection next",
+                                            icon="layout-grid",
+                                            variant="secondary",
+                                            on_click=ShowToast(
+                                                "After saving, call card_lab() to view the collection.",
+                                                variant="info",
+                                            ),
+                                        )
+
+                with Column(gap=4):
+                    _render_live_card_preview()
+                    with Card():
+                        with CardHeader():
+                            CardTitle("Card sheet")
+                            CardDescription("A compact table preview of the saved fields.")
+                        with CardContent():
+                            with Table():
+                                with TableHeader():
+                                    with TableRow():
+                                        TableHead("Field")
+                                        TableHead("Value")
+                                with TableBody():
+                                    for field, value in (
+                                        ("Name", "{{ name }}"),
+                                        ("Types", "{{ primary_type }} / {{ secondary_type }}"),
+                                        ("Weakness", "{{ weakness_type }} {{ weakness_value }}"),
+                                        ("Illustrator", "{{ illustrator }}"),
+                                    ):
+                                        with TableRow():
+                                            TableCell(field)
+                                            TableCell(value)
 
     return app
 
@@ -526,8 +838,7 @@ def design_card_walkthrough() -> str:
         "2. Save both to my collection.\n"
         "3. Call refresh_collection_images so all cards have their artwork.\n"
         "4. Show me my collection in a Prefab dashboard.\n"
-        "5. Then design a custom card: a fire-fairy hybrid called 'Embersprite'"
-        " with around 80 HP and attacks themed on temple candles.\n"
+        "5. Then open design_card so I can create a custom card in the Prefab UI.\n"
     )
 
 
