@@ -89,7 +89,7 @@ uv pip install -r requirements.txt
 
 ### 2. Optional: configure `.env`
 
-PokéLab does not ship an `.env.example`. Create a `.env` file in the repo root only if you want higher Pokemon TCG API rate limits:
+PokéLab ships with an `.env.example`. Copy it to `.env` in the repo root only if you want higher Pokemon TCG API rate limits:
 
 ```dotenv
 POKEMON_TCG_API_KEY=your_api_key_here
