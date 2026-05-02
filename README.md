@@ -1,26 +1,65 @@
 # PokéLab
 
-An MCP server that fetches, previews, saves, designs, and renders Pokemon cards inside Claude Desktop or VS Code Copilot Chat.
+PokéLab is a FastMCP server that fetches, previews, saves, designs, and renders Pokemon cards inside Claude Desktop or VS Code Copilot Chat.
 
-Built for EAGv3 Session 4 and expanded as a Prefab UI showcase.
+It started as an EAGv3 Session 4 exercise and has since been tightened into a visual-first MCP demo with distinct app tools for live search, saved collection browsing, and custom card design.
 
 ---
 
 ## What it does
 
-Seven tools, exposed over the Model Context Protocol:
+Seven tools and one built-in prompt are exposed over MCP:
 
-| Tool | What it does |
-|---|---|
-| `fetch_real_card(name)` | Looks up one real Pokemon card by name from the [Pokemon TCG API](https://docs.pokemontcg.io/); useful for raw agent-side automation |
-| `preview_real_card(name)` | Opens a visual real-card search in Prefab, renders matching prints in a compact grid with both attack names plus weakness and resistance, and lets you save a card inline |
-| `manage_collection(action, …)` | CRUD over a personal card collection persisted to JSON |
-| `refresh_collection_images()` | Backfills artwork URLs for saved cards that are missing them |
-| `card_lab()` | Renders the saved collection as an interactive Prefab UI inside the chat with full attacks plus weakness and resistance metadata |
-| `design_card()` | Opens an interactive Prefab card studio with tabs, controls, metrics, weakness/resistance editing, a table, and a live preview |
-| `save_custom_card(...)` | Saves the card submitted from the Prefab designer UI |
+| Tool | Surface | Use it when |
+|---|---|---|
+| `fetch_real_card(name)` | Raw structured data | You want one live card payload for automation, chaining, or prose answers |
+| `preview_real_card(name)` | Prefab MCP app | You want a live visual search grid with inline save buttons |
+| `manage_collection(action, …)` | Backend tool | You want to add, list, remove, or clear saved cards |
+| `refresh_collection_images()` | Maintenance tool | You want to backfill embedded art for previously saved cards |
+| `card_lab()` | Prefab MCP app | You want the saved collection dashboard, not a live API search |
+| `design_card()` | Prefab MCP app | You want an interactive card designer with live preview |
+| `save_custom_card(...)` | Backend tool | The designer or an agent wants to persist a custom card |
 
-A slash command (`/design_card_walkthrough`) is also exposed, which kicks off a visual-first demo end-to-end.
+The server also exposes `/design_card_walkthrough`, a prompt that kicks off the visual-first demo flow end-to-end.
+
+## Tool selection guide
+
+- Use `preview_real_card(name)` for live Pokemon TCG search results you want to browse visually.
+- Use `card_lab()` only for cards already saved in `sandbox/collection.json`.
+- Use `fetch_real_card(name)` when you need one normalized card object instead of a visual app.
+- Use `manage_collection(...)` and `save_custom_card(...)` as supporting persistence tools behind the UI.
+
+## Calling it from code
+
+If you want to invoke PokéLab from Python instead of chat, use a FastMCP client:
+
+```python
+import asyncio
+from fastmcp import Client
+
+
+async def main():
+  async with Client("server.py") as client:
+    raw_card = await client.call_tool("fetch_real_card", {"name": "pikachu"})
+    live_search = await client.call_tool("preview_real_card", {"name": "charizard"})
+    collection_app = await client.call_tool("card_lab", {})
+    designer_app = await client.call_tool("design_card", {})
+    saved_cards = await client.call_tool("manage_collection", {"action": "list"})
+
+
+asyncio.run(main())
+```
+
+Useful one-liners for individual tools:
+
+- `await client.call_tool("fetch_real_card", {"name": "pikachu"})`
+- `await client.call_tool("preview_real_card", {"name": "bulbasaur"})`
+- `await client.call_tool("manage_collection", {"action": "list"})`
+- `await client.call_tool("manage_collection", {"action": "remove", "card_id": "base1-4"})`
+- `await client.call_tool("refresh_collection_images", {})`
+- `await client.call_tool("card_lab", {})`
+- `await client.call_tool("design_card", {})`
+- `await client.call_tool("save_custom_card", {"name": "Embersprite", "primary_type": "Fire"})`
 
 ---
 
@@ -48,13 +87,15 @@ Or if you use `uv`:
 uv pip install -r requirements.txt
 ```
 
-### 2. Configure `.env`
+### 2. Optional: configure `.env`
 
-```bash
-cp .env.example .env
+PokéLab does not ship an `.env.example`. Create a `.env` file in the repo root only if you want higher Pokemon TCG API rate limits:
+
+```dotenv
+POKEMON_TCG_API_KEY=your_api_key_here
 ```
 
-Edit `.env` and add `POKEMON_TCG_API_KEY` if you want higher Pokemon TCG API rate limits. The custom card designer works without any external LLM key.
+The custom card designer and the visual search/collection apps work without any external LLM key.
 
 ### 3. Sanity check with the FastMCP inspector
 
@@ -115,7 +156,7 @@ Edit the file to look like this. Replace the path with the **absolute** path to 
   "mcpServers": {
     "pokelab": {
       "command": "python",
-      "args": ["C:\\Users\\Akshay\\Repos\\EAGv3\\Session 4\\pokelab\\server.py"]
+      "args": ["C:\\Users\\Akshay\\Repos\\pokelab\\server.py"]
     }
   }
 }
@@ -158,14 +199,14 @@ Create `.vscode/mcp.json` in this workspace and add:
   "servers": {
     "pokelab": {
       "type": "stdio",
-      "command": "C:/Users/Akshay/AppData/Local/Programs/Python/Python314/python.exe",
+      "command": "python",
       "args": ["C:/Users/Akshay/Repos/pokelab/server.py"]
     }
   }
 }
 ```
 
-If you want a more portable config, replace the absolute paths with the Python command and `${workspaceFolder}` path that match your machine.
+Adjust the command or path for your local Python installation if `python` is not on your PATH.
 
 ### Option 2 — command palette
 
@@ -225,8 +266,10 @@ Claude/Copilot ──MCP/stdio──►  server.py  ──HTTP──►  Pokemon
 Three layers:
 
 1. **The MCP client** picks tools based on what you ask for.
-2. **PokéLab server (`server.py`)** runs Python functions decorated with `@mcp.tool()` (or `@mcp.tool(app=True)` for the UI tools). It calls the Pokemon TCG API, persists to a JSON file, and returns either dicts/strings or Prefab UI trees. `preview_real_card`, `card_lab`, and `design_card` are the primary visual chat surfaces; `fetch_real_card` and `manage_collection` stay available as structured backend tools.
+2. **PokéLab server (`server.py`)** runs Python functions decorated with `@mcp.tool()` (or `@mcp.tool(app=True)` for the UI tools). It calls the Pokemon TCG API, persists to a JSON file, and returns either dicts/strings or Prefab UI trees. `preview_real_card`, `card_lab`, and `design_card` are the primary visual chat surfaces; `fetch_real_card`, `manage_collection`, `refresh_collection_images`, and `save_custom_card` stay available as structured backend tools.
 3. **The data plane** — JSON file for persistence and the Pokemon TCG API for real-card content.
+
+Recent metadata tightening also makes the live-search, saved-collection, and raw-fetch tools more explicit to MCP clients, which helps reduce wrong-surface launches in chat.
 
 ### The seam between MCP and Prefab
 
@@ -269,17 +312,19 @@ This makes the project a better Prefab showcase: the card studio uses tabs, card
 
 ```
 pokelab/
+├── .dev/
+│   ├── DEMO_FLOW.md
+│   ├── PROJECT_OVERVIEW.md
+│   └── development-log.md
 ├── server.py            # tools, prompt, save helper, and Prefab renderers
+├── requirements.txt
 ├── sandbox/
 │   └── collection.json  # the saved card collection
-├── requirements.txt
-├── .env.example
-├── .env                 # your real keys (gitignored)
-├── .gitignore
+├── .env                 # optional local API key file (gitignored)
 └── README.md
 ```
 
-One Python file. That's deliberate — it mirrors `example_mcp_server.py` from Lesson 01 so you can read it top to bottom.
+One Python file contains the server logic. That's deliberate — it keeps the MCP tools, Prefab renderers, and persistence pipeline readable top to bottom.
 
 ---
 
@@ -322,6 +367,12 @@ You haven't saved any cards yet. The most visual path is to call `preview_real_c
 
 Run the server through an MCP client that supports tool calls from Prefab actions. The Save button calls `save_custom_card(...)`, so the app host must support MCP Apps tool actions.
 
+### The wrong PokéLab UI opens, or the UI looks stale
+
+- Ask for the surface explicitly: say "visual live search" for `preview_real_card`, "saved collection" for `card_lab`, or "raw card data" for `fetch_real_card`.
+- Restart `pokelab` from your MCP server list if the host keeps rendering an older app.
+- If the stale UI persists, stop lingering `python .../pokelab/server.py` processes and remove `pokelab/__pycache__`, then relaunch the server.
+
 ### Pokemon TCG API rate-limited (HTTP 429)
 
 You're hitting the API too often without an API key. Add `POKEMON_TCG_API_KEY` to your `.env` (free at [dev.pokemontcg.io](https://dev.pokemontcg.io/)) — that bumps the limit from 30/min to 1000/min.
@@ -344,4 +395,4 @@ The patterns in `server.py` add up to a single Python file where one tool call f
 
 ## License
 
-MIT. Built as part of EAGv3 Session 4.
+MIT. Built during EAGv3 Session 4 and iterated into a visual-first MCP demo.
