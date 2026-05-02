@@ -185,46 +185,46 @@ CUSTOM_CARD_SOURCES = {"designed_by_llm", "designed_in_prefab"}
 
 
 def _type_art_style(types):
-        primary = (types or ["Colorless"])[0]
-        return TYPE_ART_STYLES.get(primary, TYPE_ART_STYLES["Colorless"])
+    primary = (types or ["Colorless"])[0]
+    return TYPE_ART_STYLES.get(primary, TYPE_ART_STYLES["Colorless"])
 
 
 def _art_text(value, default: str, limit: int) -> str:
-        text = str(value).strip() if value is not None else ""
-        if not text:
-                text = default
-        if len(text) > limit:
-                text = f"{text[: max(0, limit - 3)].rstrip()}..."
-        return escape(text, quote=True)
+    text = str(value).strip() if value is not None else ""
+    if not text:
+        text = default
+    if len(text) > limit:
+        text = f"{text[: max(0, limit - 3)].rstrip()}..."
+    return escape(text, quote=True)
 
 
 def _custom_card_image_data_uri(card: dict) -> str:
-        """Build a styled portrait illustration for custom cards."""
-        types = card.get("types") or ["Colorless"]
-        art = _type_art_style(types)
-        symbol = _type_style(types)["symbol"]
-        name = _art_text(card.get("name"), "Unnamed", 24)
-        subtitle = _art_text(card.get("subtitle"), "Custom Pokemon", 26)
-        rarity = _art_text(card.get("rarity"), "Custom", 18)
-        hp = _art_text(card.get("hp"), "?", 6)
-        flavor = _art_text(card.get("flavor"), "Designed in PokeLab.", 56)
-        primary_type = _art_text(types[0], "Colorless", 14)
-        attack_name = _art_text(
-                ((card.get("attacks") or [{}])[0]).get("name"),
-                "Signature Move",
-                24,
+    """Build a styled portrait illustration for custom cards."""
+    types = card.get("types") or ["Colorless"]
+    art = _type_art_style(types)
+    symbol = _type_style(types)["symbol"]
+    name = _art_text(card.get("name"), "Unnamed", 24)
+    subtitle = _art_text(card.get("subtitle"), "Custom Pokemon", 26)
+    rarity = _art_text(card.get("rarity"), "Custom", 18)
+    hp = _art_text(card.get("hp"), "?", 6)
+    flavor = _art_text(card.get("flavor"), "Designed in PokeLab.", 56)
+    primary_type = _art_text(types[0], "Colorless", 14)
+    attack_name = _art_text(
+        ((card.get("attacks") or [{}])[0]).get("name"),
+        "Signature Move",
+        24,
+    )
+    secondary_badge = ""
+    if len(types) > 1:
+        secondary_type = _art_text(types[1], "", 14)
+        secondary_badge = (
+            "<g transform='translate(408 126)'>"
+            "<rect x='0' y='0' width='176' height='36' rx='18' fill='white' fill-opacity='0.14'/>"
+            f"<text x='88' y='24' text-anchor='middle' font-family='Segoe UI, sans-serif' font-size='16' font-weight='600' fill='{art['text']}' fill-opacity='0.84'>{secondary_type}</text>"
+            "</g>"
         )
-        secondary_badge = ""
-        if len(types) > 1:
-                secondary_type = _art_text(types[1], "", 14)
-                secondary_badge = (
-                        "<g transform='translate(408 126)'>"
-                        "<rect x='0' y='0' width='176' height='36' rx='18' fill='white' fill-opacity='0.14'/>"
-                        f"<text x='88' y='24' text-anchor='middle' font-family='Segoe UI, sans-serif' font-size='16' font-weight='600' fill='{art['text']}' fill-opacity='0.84'>{secondary_type}</text>"
-                        "</g>"
-                )
 
-        svg = f"""
+    svg = f"""
 <svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 640 900' role='img' aria-label='{name} custom card art'>
     <defs>
         <linearGradient id='bg' x1='0%' y1='0%' x2='100%' y2='100%'>
@@ -263,16 +263,16 @@ def _custom_card_image_data_uri(card: dict) -> str:
     </g>
 </svg>
 """.strip()
-        return f"data:image/svg+xml;charset=utf-8,{quote(svg)}"
+    return f"data:image/svg+xml;charset=utf-8,{quote(svg)}"
 
 
 def _card_image_url(card: dict) -> str:
-        image_url = card.get("image_url", "")
-        if isinstance(image_url, str) and image_url:
-                return image_url
-        if card.get("source") in CUSTOM_CARD_SOURCES:
-                return _custom_card_image_data_uri(card)
-        return ""
+    image_url = card.get("image_url", "")
+    if isinstance(image_url, str) and image_url:
+        return image_url
+    if card.get("source") in CUSTOM_CARD_SOURCES:
+        return _custom_card_image_data_uri(card)
+    return ""
 
 
 # ===========================================================================
