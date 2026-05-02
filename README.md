@@ -13,11 +13,11 @@ Seven tools, exposed over the Model Context Protocol:
 | Tool | What it does |
 |---|---|
 | `fetch_real_card(name)` | Looks up one real Pokemon card by name from the [Pokemon TCG API](https://docs.pokemontcg.io/); useful for raw agent-side automation |
-| `preview_real_card(name)` | Opens a visual real-card search in Prefab, renders matching prints in a compact grid, and lets you save a card inline |
+| `preview_real_card(name)` | Opens a visual real-card search in Prefab, renders matching prints in a compact grid with both attack names plus weakness and resistance, and lets you save a card inline |
 | `manage_collection(action, …)` | CRUD over a personal card collection persisted to JSON |
 | `refresh_collection_images()` | Backfills artwork URLs for saved cards that are missing them |
-| `card_lab()` | Renders the saved collection as an interactive Prefab UI inside the chat |
-| `design_card()` | Opens an interactive Prefab card studio with tabs, controls, metrics, a table, and a live preview |
+| `card_lab()` | Renders the saved collection as an interactive Prefab UI inside the chat with full attacks plus weakness and resistance metadata |
+| `design_card()` | Opens an interactive Prefab card studio with tabs, controls, metrics, weakness/resistance editing, a table, and a live preview |
 | `save_custom_card(...)` | Saves the card submitted from the Prefab designer UI |
 
 A slash command (`/design_card_walkthrough`) is also exposed, which kicks off a visual-first demo end-to-end.
@@ -183,7 +183,7 @@ Once the server shows up in Claude Desktop, you can interact with it in plain En
 
 > *"Open a visual PokéLab search for Pikachu."*
 
-Copilot calls `preview_real_card("pikachu")`. A Prefab app opens inline, lays out multiple matching prints in a compact grid, and lets you save one directly from the UI.
+Copilot calls `preview_real_card("pikachu")`. A Prefab app opens inline, lays out multiple matching prints in a compact grid, shows both attack names plus weakness/resistance metadata, and lets you save one directly from the UI.
 
 ### Example 2 — collection dashboard after inline save
 

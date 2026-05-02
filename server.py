@@ -58,6 +58,7 @@ from prefab_ui.components import (
     Card,
     CardDescription,
     CardContent,
+    CardFooter,
     CardHeader,
     CardTitle,
     Checkbox,
@@ -110,17 +111,17 @@ mcp = FastMCP("PokeLab")
 # ---------------------------------------------------------------------------
 
 TYPE_STYLES = {
-    "Fire":      {"bg": "bg-orange-100",  "border": "border-orange-300", "symbol": "🔥"},
-    "Water":     {"bg": "bg-blue-100",    "border": "border-blue-300",   "symbol": "💧"},
-    "Lightning": {"bg": "bg-yellow-100",  "border": "border-yellow-300", "symbol": "⚡"},
-    "Grass":     {"bg": "bg-green-100",   "border": "border-green-300",  "symbol": "🌿"},
-    "Psychic":   {"bg": "bg-purple-100",  "border": "border-purple-300", "symbol": "🔮"},
-    "Fighting":  {"bg": "bg-red-100",     "border": "border-red-300",    "symbol": "👊"},
-    "Darkness":  {"bg": "bg-gray-800",    "border": "border-gray-600",   "symbol": "🌑"},
-    "Metal":     {"bg": "bg-slate-100",   "border": "border-slate-300",  "symbol": "⚙️"},
-    "Fairy":     {"bg": "bg-pink-100",    "border": "border-pink-300",   "symbol": "✨"},
-    "Dragon":    {"bg": "bg-indigo-100",  "border": "border-indigo-300", "symbol": "🐉"},
-    "Colorless": {"bg": "bg-gray-50",     "border": "border-gray-200",   "symbol": "⭕"},
+    "Fire":      {"bg": "bg-gradient-to-r from-orange-300 via-amber-200 to-yellow-100", "border": "border-orange-300", "symbol": "🔥"},
+    "Water":     {"bg": "bg-gradient-to-r from-sky-300 via-cyan-200 to-blue-100",       "border": "border-blue-300",   "symbol": "💧"},
+    "Lightning": {"bg": "bg-gradient-to-r from-yellow-200 via-amber-100 to-orange-50",  "border": "border-yellow-300", "symbol": "⚡"},
+    "Grass":     {"bg": "bg-gradient-to-r from-lime-300 via-green-200 to-emerald-100",  "border": "border-green-300",  "symbol": "🌿"},
+    "Psychic":   {"bg": "bg-gradient-to-r from-fuchsia-200 via-purple-200 to-violet-100","border": "border-purple-300", "symbol": "🔮"},
+    "Fighting":  {"bg": "bg-gradient-to-r from-rose-300 via-red-200 to-orange-100",      "border": "border-red-300",    "symbol": "👊"},
+    "Darkness":  {"bg": "bg-gradient-to-r from-slate-800 via-slate-700 to-zinc-600",     "border": "border-slate-700",  "symbol": "🌑"},
+    "Metal":     {"bg": "bg-gradient-to-r from-slate-200 via-zinc-100 to-slate-50",      "border": "border-slate-300",  "symbol": "⚙️"},
+    "Fairy":     {"bg": "bg-gradient-to-r from-pink-200 via-rose-100 to-fuchsia-50",     "border": "border-pink-300",   "symbol": "✨"},
+    "Dragon":    {"bg": "bg-gradient-to-r from-indigo-300 via-violet-200 to-sky-100",    "border": "border-indigo-300", "symbol": "🐉"},
+    "Colorless": {"bg": "bg-gradient-to-r from-stone-200 via-slate-100 to-white",         "border": "border-gray-200",   "symbol": "⭕"},
 }
 
 TYPE_ART_STYLES = {
@@ -313,6 +314,20 @@ def _pokemon_tcg_headers() -> dict[str, str]:
     return headers
 
 
+def _first_modifier(modifiers: list[dict] | None) -> dict | None:
+    if not modifiers:
+        return None
+    modifier = modifiers[0] or {}
+    modifier_type = str(modifier.get("type", "")).strip()
+    modifier_value = str(modifier.get("value", "")).strip()
+    if not modifier_type and not modifier_value:
+        return None
+    return {
+        "type": modifier_type,
+        "value": modifier_value or "—",
+    }
+
+
 def _normalize_real_card(card: dict, default_name: str) -> dict:
     remote_image = card.get("images", {}).get("small", "")
     return {
@@ -330,13 +345,8 @@ def _normalize_real_card(card: dict, default_name: str) -> dict:
             }
             for attack in (card.get("attacks") or [])
         ],
-        "weakness": (
-            {
-                "type": card["weaknesses"][0].get("type", ""),
-                "value": card["weaknesses"][0].get("value", ""),
-            }
-            if card.get("weaknesses") else None
-        ),
+        "weakness": _first_modifier(card.get("weaknesses")),
+        "resistance": _first_modifier(card.get("resistances")),
         "set": (card.get("set") or {}).get("name", ""),
         "number": card.get("number", ""),
         "rarity": card.get("rarity", ""),
@@ -562,6 +572,26 @@ def _save_fetched_card_action(card: dict, saved_state_key: str | None = None) ->
     )
 
 
+def _attack_slots(attacks: list[dict], *, limit: int = 2) -> list[dict | None]:
+    visible = list(attacks[:limit])
+    return visible + [None] * max(0, limit - len(visible))
+
+
+def _render_modifier_panel(label: str, modifier: dict | None, *, compact: bool = False) -> None:
+    modifier_type = str((modifier or {}).get("type", "")).strip()
+    modifier_value = str((modifier or {}).get("value", "")).strip() or "—"
+    symbol = TYPE_STYLES.get(modifier_type, TYPE_STYLES["Colorless"])["symbol"] if modifier_type else "—"
+    value_text = f"{symbol} {modifier_value}" if modifier_type else "—"
+    width_cls = "min-w-24" if compact else "min-w-28"
+    padding_cls = "px-2.5 py-1.5" if compact else "px-3 py-2"
+
+    with Column(gap=0, css_class=f"{width_cls} rounded-xl border border-slate-200/80 bg-white/80 {padding_cls} shadow-sm"):
+        Text(label, css_class="text-xs font-semibold uppercase tracking-widest text-slate-500")
+        Text(value_text, css_class="text-sm font-semibold text-slate-900")
+        if not compact:
+            Muted(modifier_type or "Not listed", css_class="text-xs")
+
+
 def _render_search_result_card(
     card: dict,
     *,
@@ -581,24 +611,27 @@ def _render_search_result_card(
     number = card.get("number", "")
     img_url = _card_image_url(card)
     attacks = card.get("attacks") or []
-    preview_attack = attacks[0] if attacks else None
-    preview_text = str((preview_attack or {}).get("text", "")).strip()
-    if len(preview_text) > 84:
-        preview_text = f"{preview_text[:81].rstrip()}..."
+    attack_slots = _attack_slots(attacks, limit=2)
+    weakness = card.get("weakness")
+    resistance = card.get("resistance")
 
-    with Card(css_class="h-full overflow-hidden shadow-md hover:shadow-xl transition-shadow duration-200"):
-        with CardHeader(css_class=f"{bg} border-b {style['border']}"):
-            with Row(justify="between", align="start"):
-                with Column(gap=1):
-                    CardTitle(name, css_class="text-base font-semibold tracking-tight leading-none")
+    with Card(css_class="h-full overflow-hidden border border-slate-200/90 bg-gradient-to-b from-white via-slate-50 to-slate-100 shadow-md hover:-translate-y-0.5 hover:shadow-xl transition-all duration-200"):
+        with CardHeader(css_class=f"{bg} border-b {style['border']} px-3 py-3"):
+            with Row(justify="between", align="start", css_class="gap-3"):
+                with Column(gap=2, css_class="flex-1 rounded-2xl border border-white/75 bg-white/82 px-3 py-2 shadow-sm"):
+                    with Row(gap=2, align="center"):
+                        with Row(gap=1, align="center", css_class="rounded-full border border-slate-200 bg-white px-2 py-1 shadow-sm"):
+                            Text(_energy_symbols(types) or symbol, css_class="text-sm")
+                        CardTitle(name, css_class="text-base font-black tracking-tight leading-none text-slate-950")
                     if subtitle or set_name:
                         CardDescription(
                             f"{subtitle} · {set_name}" if subtitle and set_name else subtitle or set_name,
-                            css_class="text-sm font-medium",
+                            css_class="text-sm font-medium text-slate-700",
                         )
-                with Column(gap=1, align="end"):
-                    Badge(_energy_symbols(types) or symbol, variant="secondary")
-                    Text(f"{hp} HP", css_class="text-sm font-black leading-none")
+                with Column(gap=1, align="end", css_class="min-w-20 rounded-2xl border border-white/80 bg-amber-50/90 px-3 py-2 shadow-sm"):
+                    Text("HP", css_class="text-xs font-semibold uppercase tracking-widest text-amber-700")
+                    Text(f"{hp}", css_class="text-lg font-black leading-none text-slate-950")
+                    Text(rarity, css_class="text-xs font-medium text-slate-700 text-right")
 
         if img_url:
             with CardContent():
@@ -606,51 +639,53 @@ def _render_search_result_card(
                     src=img_url,
                     alt=f"{name} Pokemon card",
                     width="100%",
-                    height="auto",
-                    css_class="w-full rounded-xl bg-white object-contain p-2",
+                    height="240px",
+                    css_class="w-full rounded-2xl bg-white/90 object-contain p-2 shadow-sm",
                 )
         else:
             with CardContent():
-                with Column(align="center", justify="center", css_class=f"{bg} min-h-40 rounded-xl"):
+                with Column(align="center", justify="center", css_class=f"{bg} min-h-60 rounded-2xl"):
                     Text(symbol, css_class="text-5xl opacity-30")
 
         with CardContent():
-            with Row(gap=2):
+            with Row(gap=2, css_class="flex-wrap"):
                 for type_name in types[:2]:
                     Badge(type_name, variant="secondary", css_class="text-xs")
                 Badge(rarity, variant="info", css_class="text-xs")
 
-            with Column(gap=1, css_class="mt-3"):
-                if preview_attack:
+            with Column(gap=2, css_class="mt-3 min-h-24"):
+                for attack in attack_slots:
+                    with Row(justify="between", align="center", css_class="min-h-10 rounded-xl border border-slate-200/80 bg-white/78 px-3 py-2 shadow-sm"):
+                        if attack:
+                            cost_str = _energy_symbols(attack.get("cost", []))
+                            with Row(gap=2, align="center"):
+                                if cost_str:
+                                    Text(cost_str, css_class="text-xs")
+                                Text(attack.get("name", "Attack"), css_class="text-sm font-semibold text-slate-900")
+                            if attack.get("damage"):
+                                Text(attack["damage"], css_class="text-sm font-bold text-slate-900")
+                        else:
+                            Muted("—", css_class="text-sm italic")
+
+        with CardFooter(css_class="border-t border-slate-200/80 bg-slate-50/85"):
+            with Column(gap=2, css_class="w-full"):
+                with Row(justify="between", align="start", css_class="gap-2"):
+                    with Row(gap=2, css_class="flex-wrap"):
+                        _render_modifier_panel("Weakness", weakness, compact=True)
+                        _render_modifier_panel("Resistance", resistance, compact=True)
+                    with Column(gap=0, align="end", css_class="rounded-xl border border-slate-200/80 bg-white/80 px-3 py-2 shadow-sm"):
+                        Text(set_name or "Set", css_class="text-xs font-semibold uppercase tracking-widest text-slate-500")
+                        Text(f"#{number}" if number else "—", css_class="text-sm font-semibold text-slate-900")
+
+                if saved_state_key:
                     with Row(justify="between", align="center"):
-                        Text(preview_attack.get("name", "Attack"), css_class="font-semibold text-sm")
-                        if preview_attack.get("damage"):
-                            Text(preview_attack["damage"], css_class="font-bold text-sm")
-                    if preview_text:
-                        Muted(preview_text, css_class="text-xs leading-tight")
-                else:
-                    Muted("No attacks", css_class="text-xs italic")
-
-            Separator(css_class="my-3")
-            with Row(justify="between", align="center"):
-                weakness = card.get("weakness")
-                if weakness:
-                    weak_symbol = TYPE_STYLES.get(weakness.get("type", ""), TYPE_STYLES["Colorless"])["symbol"]
-                    Muted(f"Weak {weak_symbol} {weakness.get('value', '')}", css_class="text-xs")
-                else:
-                    Muted("Weakness not listed", css_class="text-xs")
-                if number:
-                    Muted(f"#{number}", css_class="text-xs text-right")
-
-            if saved_state_key:
-                with Row(justify="between", align="center", css_class="mt-3"):
-                    with If(saved_state_key):
-                        Badge("Saved to collection", variant="secondary", css_class="text-xs")
-                    with If(f"!{saved_state_key}"):
-                        Muted("Save this print", css_class="text-xs")
-                    if save_action is not None:
+                        with If(saved_state_key):
+                            Badge("Saved to collection", variant="secondary", css_class="text-xs")
                         with If(f"!{saved_state_key}"):
-                            Button("Save print", icon="save", variant="success", on_click=save_action)
+                            Muted("Save this print", css_class="text-xs")
+                        if save_action is not None:
+                            with If(f"!{saved_state_key}"):
+                                Button("Save print", icon="save", variant="success", on_click=save_action)
 
 
 def _render_card(
@@ -665,44 +700,32 @@ def _render_card(
     bg       = style["bg"]
     symbol   = style["symbol"]
     type_symbols = _energy_symbols(types) or symbol
-    is_dark  = types[0] == "Darkness"
-    title_cls = "text-white drop-shadow-sm" if is_dark else "text-slate-950"
-    subtitle_cls = "text-slate-200" if is_dark else "text-slate-700"
-    chip_cls = (
-        "rounded-full border border-white/15 bg-white/10 px-2.5 py-1 shadow-sm"
-        if is_dark else
-        "rounded-full border border-white/70 bg-white/80 px-2.5 py-1 shadow-sm"
-    )
-    metric_cls = (
-        "rounded-2xl border border-white/15 bg-white/10 px-3 py-1.5 shadow-sm"
-        if is_dark else
-        "rounded-2xl border border-white/70 bg-white/85 px-3 py-1.5 shadow-sm"
-    )
     name     = card.get("name", "Unknown")
     hp       = card.get("hp", "?")
     rarity   = card.get("rarity", "")
     rarity_sym = RARITY_SYMBOL.get(rarity, "")
     rarity_label = rarity_sym or rarity or ("Custom" if card.get("source") in CUSTOM_CARD_SOURCES else "")
 
-    with Card(css_class="overflow-hidden shadow-md hover:shadow-xl transition-shadow duration-200"):
+    with Card(css_class="overflow-hidden border border-slate-200/90 bg-gradient-to-b from-white via-slate-50 to-slate-100 shadow-md hover:-translate-y-0.5 hover:shadow-xl transition-all duration-200"):
 
         # — Coloured header band ———————————————————————————————————————————
-        with CardHeader(css_class=f"{bg} border-b {style['border']}"):
-            with Row(justify="between", align="start"):
-                with Column(gap=1):
+        with CardHeader(css_class=f"{bg} border-b {style['border']} px-4 py-4"):
+            with Row(justify="between", align="start", css_class="gap-3"):
+                with Column(gap=2, css_class="flex-1 rounded-3xl border border-white/75 bg-white/82 px-4 py-3 shadow-sm"):
                     with Row(gap=2, align="center"):
-                        with Row(gap=1, align="center", css_class=chip_cls):
+                        with Row(gap=1, align="center", css_class="rounded-full border border-slate-200 bg-white px-2 py-1 shadow-sm"):
                             Text(type_symbols, css_class="text-sm")
-                        CardTitle(name, css_class=f"text-lg font-semibold tracking-tight leading-none {title_cls}")
+                        CardTitle(name, css_class="text-xl font-black tracking-tight leading-none text-slate-950")
                     if card.get("subtitle"):
                         CardDescription(
                             card["subtitle"],
-                            css_class=f"text-sm font-medium {subtitle_cls}",
+                            css_class="text-sm font-medium text-slate-700",
                         )
-                with Column(gap=0, align="end", css_class=metric_cls):
-                    Text(f"{hp} HP", css_class=f"text-xl font-black leading-none {title_cls}")
+                with Column(gap=1, align="end", css_class="min-w-24 rounded-2xl border border-white/80 bg-amber-50/90 px-3 py-2 shadow-sm"):
+                    Text("HP", css_class="text-xs font-semibold uppercase tracking-widest text-amber-700")
+                    Text(f"{hp}", css_class="text-2xl font-black leading-none text-slate-950")
                     if rarity_label:
-                        Text(rarity_label, css_class=f"text-xs font-medium {subtitle_cls}")
+                        Text(rarity_label, css_class="text-xs font-medium text-slate-700 text-right")
 
         # — Card image ———————————————————————————————————————————————————
         img_url = _card_image_url(card)
@@ -713,11 +736,11 @@ def _render_card(
                     alt=f"{name} Pokemon card",
                     width="100%",
                     height="auto",
-                    css_class="w-full object-contain bg-gray-50",
+                    css_class="w-full rounded-2xl bg-white/90 object-contain p-3 shadow-sm",
                 )
         else:
             with CardContent():
-                with Column(align="center", justify="center", css_class=f"{bg} min-h-28"):
+                with Column(align="center", justify="center", css_class=f"{bg} min-h-32 rounded-2xl"):
                     Text(symbol, css_class="text-5xl opacity-30")
 
         # — Attacks ——————————————————————————————————————————————————————
@@ -728,47 +751,44 @@ def _render_card(
                     for atk in attacks:
                         cost_str = _energy_symbols(atk.get("cost", []))
                         dmg = atk.get("damage", "")
-                        with Column(gap=1):
+                        with Column(gap=1, css_class="rounded-2xl border border-slate-200/80 bg-white/78 px-3 py-2 shadow-sm"):
                             with Row(justify="between", align="center"):
                                 with Row(gap=1, align="center"):
                                     if cost_str:
                                         Text(cost_str, css_class="text-sm")
-                                    Text(atk["name"], css_class="font-semibold text-sm")
+                                    Text(atk["name"], css_class="font-semibold text-sm text-slate-900")
                                 if dmg:
-                                    Text(dmg, css_class="font-bold text-sm")
+                                    Text(dmg, css_class="font-bold text-sm text-slate-900")
                             if atk.get("text"):
                                 Muted(atk["text"], css_class="text-xs leading-tight")
             else:
                 Muted("No attacks", css_class="text-xs italic")
 
         # — Footer ———————————————————————————————————————————————————————
-        with CardContent():
-            Separator(css_class="mb-2")
-            with Row(justify="between", align="center"):
-                w = card.get("weakness")
-                if w:
-                    weak_sym = TYPE_STYLES.get(w.get("type", ""), TYPE_STYLES["Colorless"])["symbol"]
-                    Muted(f"Weak: {weak_sym} {w.get('value', '')}", css_class="text-xs")
-                else:
-                    Muted("Weak: —", css_class="text-xs")
-                set_name = card.get("set", "")
-                number   = card.get("number", "")
-                if set_name or number:
-                    Muted(f"{set_name} #{number}" if number else set_name,
-                          css_class="text-xs text-right")
-            if card.get("flavor"):
-                Muted(card["flavor"], css_class="text-xs italic mt-2 block")
-            if card.get("source") in CUSTOM_CARD_SOURCES:
-                Badge("✦ Custom", variant="secondary", css_class="text-xs mt-1")
-            if saved_state_key:
-                with Row(justify="between", align="center", css_class="mt-3"):
-                    with If(saved_state_key):
-                        Badge("Saved to collection", variant="secondary", css_class="text-xs")
-                    with If(f"!{saved_state_key}"):
-                        Muted("Not in collection yet.", css_class="text-xs")
-                    if save_action is not None:
+        with CardFooter(css_class="border-t border-slate-200/80 bg-slate-50/85"):
+            with Column(gap=2, css_class="w-full"):
+                with Row(justify="between", align="start", css_class="gap-3"):
+                    with Row(gap=2, css_class="flex-wrap"):
+                        _render_modifier_panel("Weakness", card.get("weakness"))
+                        _render_modifier_panel("Resistance", card.get("resistance"))
+                    set_name = card.get("set", "")
+                    number = card.get("number", "")
+                    with Column(gap=0, align="end", css_class="rounded-xl border border-slate-200/80 bg-white/80 px-3 py-2 shadow-sm"):
+                        Text(set_name or "Set", css_class="text-xs font-semibold uppercase tracking-widest text-slate-500")
+                        Text(f"#{number}" if number else "—", css_class="text-sm font-semibold text-slate-900")
+                if card.get("flavor"):
+                    Muted(card["flavor"], css_class="text-xs italic")
+                if card.get("source") in CUSTOM_CARD_SOURCES:
+                    Badge("✦ Custom", variant="secondary", css_class="text-xs")
+                if saved_state_key:
+                    with Row(justify="between", align="center"):
+                        with If(saved_state_key):
+                            Badge("Saved to collection", variant="secondary", css_class="text-xs")
                         with If(f"!{saved_state_key}"):
-                            Button("Save to collection", icon="save", variant="success", on_click=save_action)
+                            Muted("Not in collection yet.", css_class="text-xs")
+                        if save_action is not None:
+                            with If(f"!{saved_state_key}"):
+                                Button("Save to collection", icon="save", variant="success", on_click=save_action)
 
 
 @mcp.tool(app=True)
@@ -913,6 +933,8 @@ def _build_custom_card(
     attack_2_text: str = "",
     weakness_type: str = "Water",
     weakness_value: str = "x2",
+    resistance_type: str = "",
+    resistance_value: str = "-30",
     flavor: str = "",
     illustrator: str = "PokeLab",
     holo=False,
@@ -939,6 +961,13 @@ def _build_custom_card(
             "type": _choice(weakness_type, CARD_TYPES, "Colorless"),
             "value": weakness_value.strip() or "x2",
         },
+        "resistance": (
+            {
+                "type": resistance_type,
+                "value": resistance_value.strip() or "-30",
+            }
+            if resistance_type in CARD_TYPES else None
+        ),
         "set": "Custom Lab",
         "number": card_id.replace("custom-", "C"),
         "rarity": _choice(rarity, CUSTOM_RARITIES, "Custom"),
@@ -972,6 +1001,8 @@ def save_custom_card(
     attack_2_text: str = "If this Pokemon has a status condition, this attack does 30 more damage.",
     weakness_type: str = "Water",
     weakness_value: str = "x2",
+    resistance_type: str = "",
+    resistance_value: str = "-30",
     flavor: str = "Small temple flames gather around it when wishes are spoken.",
     illustrator: str = "PokeLab",
     holo: bool | str = True,
@@ -998,6 +1029,8 @@ def save_custom_card(
         attack_2_text=attack_2_text,
         weakness_type=weakness_type,
         weakness_value=weakness_value,
+        resistance_type=resistance_type,
+        resistance_value=resistance_value,
         flavor=flavor,
         illustrator=illustrator,
         holo=holo,
@@ -1034,6 +1067,8 @@ def _save_card_action() -> CallTool:
             "attack_2_text": "{{ attack_2_text }}",
             "weakness_type": "{{ weakness_type }}",
             "weakness_value": "{{ weakness_value }}",
+            "resistance_type": "{{ resistance_type }}",
+            "resistance_value": "{{ resistance_value }}",
             "flavor": "{{ flavor }}",
             "illustrator": "{{ illustrator }}",
             "holo": "{{ holo }}",
@@ -1050,19 +1085,20 @@ def _save_card_action() -> CallTool:
 
 
 def _render_live_card_preview() -> None:
-    with Card(css_class="overflow-hidden shadow-lg"):
-        with CardHeader(css_class="bg-amber-100 border-b border-amber-300"):
-            with Row(justify="between", align="start"):
-                with Column(gap=1):
-                    with Row(gap=1, align="center"):
-                        Text("✦", css_class="text-lg")
-                        CardTitle("{{ name }}", css_class="text-base")
-                    CardDescription("{{ stage }} · {{ primary_type }} / {{ secondary_type }}")
-                Text("{{ hp }} HP", css_class="text-xl font-extrabold text-gray-700")
+    with Card(css_class="overflow-hidden border border-slate-200/90 bg-gradient-to-b from-white via-slate-50 to-slate-100 shadow-lg"):
+        with CardHeader(css_class="bg-gradient-to-r from-amber-200 via-orange-100 to-yellow-50 border-b border-amber-300"):
+            with Row(justify="between", align="start", css_class="gap-3"):
+                with Column(gap=2, css_class="flex-1 rounded-3xl border border-white/80 bg-white/85 px-4 py-3 shadow-sm"):
+                    with Row(gap=2, align="center"):
+                        Badge("{{ primary_type }}", variant="secondary")
+                        CardTitle("{{ name }}", css_class="text-base font-black tracking-tight")
+                    CardDescription("{{ stage }} · {{ primary_type }} / {{ secondary_type }}", css_class="text-sm font-medium text-slate-700")
+                with Column(gap=1, align="end", css_class="rounded-2xl border border-white/80 bg-amber-50/90 px-3 py-2 shadow-sm"):
+                    Text("HP", css_class="text-xs font-semibold uppercase tracking-widest text-amber-700")
+                    Text("{{ hp }}", css_class="text-xl font-black text-slate-900")
         with CardContent():
             with Column(gap=3):
                 with Row(gap=2):
-                    Badge("{{ primary_type }}", variant="secondary")
                     Badge("{{ rarity }}", variant="info")
                     Badge("{{ holo ? 'Holo' : 'Matte' }}", variant="success")
                 Progress(value="{{ hp }}", max=220, target=120, variant="warning", gradient=True)
@@ -1077,6 +1113,9 @@ def _render_live_card_preview() -> None:
                         Text("{{ attack_2_damage }}", css_class="font-bold text-sm")
                     Muted("{{ attack_2_text }}", css_class="text-xs leading-tight")
                 Separator()
+                with Row(gap=2, css_class="flex-wrap"):
+                    Badge("Weak {{ weakness_type }} {{ weakness_value }}", variant="warning")
+                    Badge("{{ resistance_type ? 'Resistance ' + resistance_type + ' ' + resistance_value : 'Resistance —' }}", variant="secondary")
                 Muted("{{ flavor }}", css_class="text-xs italic")
 
 
@@ -1100,6 +1139,8 @@ def design_card() -> PrefabApp:
         "attack_2_text": "If this Pokemon has a status condition, this attack does 30 more damage.",
         "weakness_type": "Water",
         "weakness_value": "x2",
+        "resistance_type": "",
+        "resistance_value": "-30",
         "flavor": "Small temple flames gather around it when wishes are spoken.",
         "illustrator": "PokeLab",
         "holo": True,
@@ -1154,7 +1195,7 @@ def design_card() -> PrefabApp:
                         with Card():
                             with CardHeader():
                                 CardTitle("Battle stats")
-                                CardDescription("Tune HP, attacks, weakness, and battle flavor.")
+                                CardDescription("Tune HP, attacks, weakness, resistance, and battle flavor.")
                             with CardContent():
                                 with Column(gap=4):
                                     with Grid(columns=3, gap=4):
@@ -1201,6 +1242,14 @@ def design_card() -> PrefabApp:
                                         with Column(gap=2):
                                             Text("Weakness value", css_class="text-sm font-medium")
                                             Input(name="weakness_value", placeholder="x2")
+                                        with Column(gap=2):
+                                            Text("Resistance type", css_class="text-sm font-medium")
+                                            with Select(name="resistance_type", placeholder="Optional"):
+                                                SelectOption("None", value="")
+                                                _select_options(CARD_TYPES)
+                                        with Column(gap=2):
+                                            Text("Resistance value", css_class="text-sm font-medium")
+                                            Input(name="resistance_value", placeholder="-30")
                                     with Row(gap=4, align="center"):
                                         # Switch / Checkbox bind reactively via `name`. Passing a
                                         # templated string for `value` (e.g. "{{ holo }}") fails
@@ -1240,6 +1289,7 @@ def design_card() -> PrefabApp:
                                         ("Name", "{{ name }}"),
                                         ("Types", "{{ primary_type }} / {{ secondary_type }}"),
                                         ("Weakness", "{{ weakness_type }} {{ weakness_value }}"),
+                                        ("Resistance", "{{ resistance_type ? resistance_type + ' ' + resistance_value : '—' }}"),
                                         ("Illustrator", "{{ illustrator }}"),
                                     ):
                                         with TableRow():
